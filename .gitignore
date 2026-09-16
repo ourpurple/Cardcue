@@ -1,0 +1,17 @@
+.idea/
+.gradle/
+.gradle-tools/
+.gradle-user-home/
+.kotlin/
+**/build/
+local.properties
+*.iml
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+*.eml
+*.mbox
+private-samples/
+*.keystore
+*.jks
