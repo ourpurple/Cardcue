@@ -1,6 +1,6 @@
 # 首版验证记录
 
-更新日期：2026-09-17。状态：**P0 设备测试全部通过，布局修复验证完成；后台新架构尚未实现**。
+更新日期：2026-09-17。状态：**P0 设备测试全部通过；S1 后台业务层、API、设备鉴权 45 项测试全部通过**。
 
 ## 2026-09-17 验证结果
 
@@ -41,6 +41,44 @@
 - 屏幕旋转、键盘遮挡的交互验证。
 - API 26 兼容性验证（需模拟器或旧设备）。
 - 后台新架构（S1 及以后）尚未实现。
+
+
+## 2026-09-17 S1-04/05/06/07 验收通过
+
+### API 集成测试（17 项全部通过）
+
+- **Health & Capabilities (2 项)**：version 0.2.0、stage s1-storage、accounts/statements/payments/device_auth 已启用、email_sync 未启用。
+- **Account CRUD (3 项)**：创建/列表、获取/更新（alias 和 status）、404 not found。
+- **Card CRUD (1 项)**：创建卡片关联账户、列出账户下的卡片。
+- **Statement & Version (2 项)**：创建账单自动生成版本、读取明细含剩余金额、due_date < statement_date 被拒(409)。
+- **Payment 事务安全 (7 项)**：记录还款扣减剩余、超额还款被拒(409)、币种不匹配被拒(409)、幂等 request_id 去重、撤销后恢复剩余并允许重新支付、重复撤销被拒(409)、列出账单还款记录。
+- **Device Auth (2 项)**：配对返回一次性 token、列表含设备、撤销后 status=revoked 且 revoked_at 有值。
+
+### 修复的问题
+
+- **asyncpg event loop 冲突**：pytest-asyncio 默认 `function` scope loop 导致连接池跨 loop 复用失败。设置 `asyncio_default_test_loop_scope = "session"` 使所有异步测试共享同一 loop。
+- **MissingGreenlet 序列化错误**：Service 层 `flush()` 后 Pydantic 序列化 ORM 对象时触发惰性加载。在所有 `flush()` 后添加 `session.refresh(obj)` 确保服务端生成的列（server_default、onupdate）已加载。
+
+### 全量测试
+
+- `python -m pytest -v`：**45 passed**, 0 failed, 0 skipped。
+  - test_api.py: 3 项（health、capabilities、no-parser）
+  - test_contracts.py: 11 项（合约验证）
+  - test_models.py: 14 项（PostgreSQL 约束）
+  - test_s1_api.py: 17 项（API 集成）
+
+### 新增/修改文件
+
+- `backend/cardcue_api/api/billing.py` — 账户/卡片/账单/还款路由
+- `backend/cardcue_api/api/devices.py` — 设备配对/撤销路由
+- `backend/cardcue_api/domain/schemas.py` — Pydantic DTO
+- `backend/cardcue_api/services/billing.py` — BillingService (SELECT FOR UPDATE、幂等、撤销)
+- `backend/cardcue_api/services/auth.py` — DeviceService (SHA-256 token hash)
+- `backend/cardcue_api/persistence/device.py` — Device 模型
+- `backend/cardcue_api/persistence/changelog.py` — ChangeLog 模型
+- `backend/cardcue_api/migrations/versions/0002_...py` — 设备与变更日志迁移
+- `backend/tests/conftest.py` — session scope engine dispose
+- `backend/tests/test_s1_api.py` — 17 项 API 集成测试
 
 ## 历史记录
 
