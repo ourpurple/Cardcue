@@ -14,7 +14,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = "com.cardcue.app.testing.CardCueTestRunner"
     }
     buildTypes { release { isMinifyEnabled = false } }
     compileOptions {

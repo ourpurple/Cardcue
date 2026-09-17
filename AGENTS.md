@@ -2,6 +2,7 @@
 
 - 产品是个人自用 Android 信用卡账单工具。先阅读 README.md、docs/PLAN.md 和 docs/VERIFICATION.md。
 - 原生 Android 使用 Kotlin、Compose、Room；后台使用 Python 3.11+、FastAPI。
+- 目标架构已确认：后台定时读取邮箱、统一调用模型并保存权威数据；Android 按功能拆分，Room 作缓存，启动时同步。首版后台模式离线只读、联网写入，具体依照 docs/ARCHITECTURE.md。旧本地演示数据保留，不自动上传为正式欠款。
 - 所有金额使用整数最小货币单位，不得用浮点数保存或计算账单金额。
 - 共用账户的多卡账单只统计一次；不同币种分别汇总。卡片尾号不是全局唯一身份。
 - 还款记录不代表银行转账；保留撤销记录，事务内校验实际剩余金额。

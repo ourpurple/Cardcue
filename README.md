@@ -1,6 +1,6 @@
 # CardCue
 
-个人自用的 Android 信用卡账单工具。**当前为 0.1.0 首版源码，使用演示数据；Android APK 尚未完成构建验证。**
+个人自用的 Android 信用卡账单工具。**当前仍是 0.1.0 本地演示版本；目标已调整为后台统一存储和定时解析、Android 启动同步。新架构尚未实现，P0 新增设备测试仍待完整验证。**
 
 ## 当前能力
 
@@ -12,6 +12,16 @@
 - FastAPI 服务骨架、健康检查及下一阶段解析数据结构草案。
 
 当前 App **不读取邮箱、不调用模型、不转账、不发送通知**。页面会明确显示演示状态。当前没有备份功能，卸载或清除数据会丢失本地记录。
+
+## 已确定的目标架构
+
+- 后台定时读取新浪邮箱，统一完成文档提取、模型解析与草稿管理；手机关闭不影响收件。
+- 后台统一保存账户、卡片、账单、版本、邮件来源和还款记录。Android 使用 Room 缓存，启动时自动同步。
+- 手机提供核对、确认入账、记录还款与撤销；后台校验并保存。首版后台模式离线可查看缓存，写入需联网。
+- Android 按首页、账单、账户、同步等功能拆分；邮箱授权码和模型密钥只保存在后台。
+- 保留现有本地数据，通过明确迁移区分旧演示数据和服务端正式账单，不自动上传演示欠款。
+
+完整职责、业务模型、同步协议与迁移原则见 [架构说明](docs/ARCHITECTURE.md)。以上是目标设计，当前 App 仍独立运行。
 
 ## 目录
 
@@ -36,7 +46,15 @@ cd D:\code\cardcue
 .\scripts\build-android.ps1 -JavaHome '你的JDK目录' -AndroidHome '你的Android SDK目录'
 ```
 
-脚本校验官方 Gradle SHA-256，生成标准 Gradle Wrapper，然后运行单元测试、Lint 和 debug APK 构建。由于本次环境无法完成依赖下载，源码包暂不包含生成的 Wrapper JAR；首次成功运行脚本后，请把 `gradlew`、`gradlew.bat` 与 `gradle/wrapper/` 提交到版本管理。
+工程已包含标准 Gradle Wrapper，下载版本由官方 SHA-256 固定。脚本运行单元测试、Lint 和 debug APK 构建。官方 Gradle 下载超时时可加 `-UseMirror`：优先复用项目内的镜像缓存，缓存缺失时下载镜像并校验 SHA-256。此选项只影响 Gradle 发行包，不改变 Google/Maven 依赖仓库。
+
+若依赖下载出现 `Permission denied: getsockopt`，可在允许联网的终端加 `-NoDaemon`，避免复用此前在受限会话中启动的 Gradle 后台进程：
+
+```powershell
+.\scripts\build-android.ps1 -UseMirror -NoDaemon -DeviceTests
+```
+
+`-NoDaemon` 不会授予网络权限；构建进程仍需获准访问依赖仓库。未连接测试设备时去掉 `-DeviceTests`。
 
 成功后 APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。后续也可使用：
 
@@ -45,7 +63,7 @@ cd D:\code\cardcue\android
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
-连接设备或启动模拟器后，运行 `scripts/build-android.ps1 -DeviceTests`，或用 Wrapper 执行 `connectedDebugAndroidTest`。UI 测试要求全新安装的演示数据库；先卸载测试版会删除其全部本地数据。
+连接专用测试设备或启动模拟器后，运行 `scripts/build-android.ps1 -DeviceTests`，或用 Wrapper 执行 `connectedDebugAndroidTest`。新增测试已改为由专用 Application 注入独立数据库，目前仍待完整回归；不要为了测试卸载 App 或清除日常数据库。
 
 ## 后台开发
 
@@ -63,10 +81,10 @@ python -m venv .venv
 
 ## 下一阶段
 
-新浪 IMAP 手动同步 → 邮件去重与筛选 → 附件提取 → 大模型结构化解析 → 原文核对与确认入账。详见 [开发计划](docs/PLAN.md)。
+先完成当前 P0 测试改动的验证，再依次推进后台业务与 PostgreSQL 存储基础、Android 功能拆分、启动同步与在线写入、后台定时收件、模型解析和人工确认，最后完成旧数据迁移与后台备份恢复验收。任务、依赖和验收标准详见 [开发计划](docs/PLAN.md)。
 
 邮箱授权码、模型密钥及真实邮件样本不要提交到 Git。`.gitignore` 已排除常见凭证文件与邮件样本。
 
 ## 验证状态
 
-后台测试已通过。Android 源码已做语法检查，但尚未通过 Gradle 编译、Lint、设备数据库测试或页面运行验证。语法检查不等于可安装 APK。详见 [验证记录](docs/VERIFICATION.md)。
+后台原有 14 项测试已通过。P0 首页规则与测试隔离改造后的主程序构建、单元测试和 Lint 已通过；新增设备测试在编译阶段发现问题，修正后尚未完整重跑。Android 16 真机上的 4 项设备测试通过记录属于此前版本，不能作为当前 P0 或新架构验收结果。详见 [验证记录](docs/VERIFICATION.md)。

@@ -2,6 +2,9 @@ package com.cardcue.app.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -31,6 +34,7 @@ import com.cardcue.app.data.Bill
 import com.cardcue.app.data.Payment
 import com.cardcue.app.domain.BillingRules
 import com.cardcue.app.domain.Money
+import com.cardcue.app.domain.HomeRules
 import kotlinx.coroutines.delay
 import java.time.Instant
 import java.time.LocalDate
@@ -54,6 +58,7 @@ private val Palette = lightColorScheme(
 fun CardCueApp(model: CardCueViewModel) {
     val state by model.state.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var historyFilter by rememberSaveable { mutableIntStateOf(0) }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var paymentId by rememberSaveable { mutableStateOf<String?>(null) }
     var syncInfo by rememberSaveable { mutableStateOf(false) }
@@ -75,6 +80,7 @@ fun CardCueApp(model: CardCueViewModel) {
                     listOf("账单" to Icons.Outlined.CreditCard, "历史" to Icons.Outlined.History, "设置" to Icons.Outlined.Tune)
                         .forEachIndexed { index, (label, icon) ->
                             NavigationBarItem(
+                                modifier = Modifier.testTag("tab-$index"),
                                 selected = tab == index, onClick = { tab = index },
                                 icon = { Icon(icon, contentDescription = null) },
                                 label = { Text(label) },
@@ -100,7 +106,7 @@ fun CardCueApp(model: CardCueViewModel) {
                     onBack = { selectedId = null }, onPay = { paymentId = selected.statement.id },
                     onVoid = model::voidPayment)
                 tab == 0 -> HomeScreen(state.bills, today, pageModifier, onOpen = { selectedId = it }, onPay = { paymentId = it }, onSync = { syncInfo = true })
-                tab == 1 -> HistoryScreen(state.bills, pageModifier, onOpen = { selectedId = it })
+                tab == 1 -> HistoryScreen(state.bills, historyFilter, pageModifier, onFilter = { historyFilter = it }, onOpen = { selectedId = it })
                 else -> SettingsScreen(pageModifier)
             }
         }
@@ -121,52 +127,47 @@ fun CardCueApp(model: CardCueViewModel) {
 
 @Composable
 private fun HomeScreen(bills: List<Bill>, today: LocalDate, modifier: Modifier, onOpen: (String) -> Unit, onPay: (String) -> Unit, onSync: () -> Unit) {
-    val latestIds = bills.groupBy { it.statement.accountKey to it.statement.currency }
-        .values.mapNotNull { group -> group.maxByOrNull { it.statement.dueDate }?.statement?.id }.toSet()
-    val shown = bills.filter { !it.settled || it.statement.id in latestIds }.sortedWith(compareBy<Bill> { it.settled }.thenBy { it.statement.dueDate })
-    val pending = bills.filterNot { it.settled }
-    val totals = pending.groupBy { it.statement.currency }.mapValues { (_, rows) -> rows.sumOf { it.remaining } }
-    val soon = pending.count { BillingRules.daysUntil(LocalDate.parse(it.statement.dueDate), today) in 0..6 }
-    LazyColumn(modifier, contentPadding = PaddingValues(bottom = 16.dp)) {
+    val overview = remember(bills, today) { runCatching { HomeRules.summarize(bills, today) }.getOrNull() }
+    if (overview == null) {
+        Column(modifier.padding(20.dp)) {
+            Text("账单汇总异常", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("金额超出支持范围或账单存在冲突。请在历史中核对记录，当前不显示合计。", modifier = Modifier.padding(top = 12.dp))
+        }
+        return
+    }
+    val totals = overview.totals
+    val soon = overview.dueSoonCount
+    LazyColumn(modifier.testTag("home-list"), contentPadding = PaddingValues(bottom = 16.dp)) {
         item {
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp)).background(Ink).padding(24.dp)) {
+            Column(Modifier.testTag("home-header").fillMaxWidth().clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)).background(Ink).padding(horizontal = 20.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("CardCue", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold, letterSpacing = (-1).sp)
-                        Text("账单清楚，还款有数。", color = Color(0xFFB7C1C4), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
-                    }
+                    Text("CardCue", color = Color.White, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp, modifier = Modifier.weight(1f))
                     Surface(color = Gold.copy(alpha = 0.15f), shape = RoundedCornerShape(50)) {
-                        Text("演示版", color = Gold, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp))
+                        Text("演示版", color = Gold, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
                     }
-                }
-                Spacer(Modifier.height(30.dp))
-                Text("待还合计 · 人民币", color = Color(0xFFB7C1C4), fontSize = 13.sp)
-                Text(Money.display(totals["CNY"] ?: 0L, "CNY"), color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Medium, letterSpacing = (-1).sp, modifier = Modifier.padding(top = 6.dp))
-                totals.filterKeys { it != "CNY" }.forEach { (currency, amount) ->
-                    Text("另有 ${Money.display(amount, currency)} · 单独统计", color = Gold, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
-                }
-                Spacer(Modifier.height(23.dp))
-                HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
-                Row(Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text("$soon 笔近期到期", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text("未来 7 天（含今天）", color = Color(0xFFB7C1C4), fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp))
-                    }
-                    FilledTonalButton(onClick = onSync, colors = ButtonDefaults.filledTonalButtonColors(containerColor = Gold, contentColor = Ink), contentPadding = PaddingValues(horizontal = 16.dp)) {
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = onSync, colors = ButtonDefaults.textButtonColors(contentColor = Gold), contentPadding = PaddingValues(horizontal = 8.dp)) {
                         Icon(Icons.Outlined.Sync, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("同步邮箱", fontSize = 13.sp)
+                        Spacer(Modifier.width(4.dp))
+                        Text("同步邮箱", fontSize = 12.sp)
                     }
                 }
+                Spacer(Modifier.height(4.dp))
+                Text("待还合计 · 人民币", color = Color(0xFFB7C1C4), fontSize = 12.sp, lineHeight = 16.sp)
+                Text(Money.display(totals["CNY"] ?: 0L, "CNY"), color = Color.White, fontSize = 30.sp, lineHeight = 38.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.5).sp, maxLines = 1, modifier = Modifier.fillMaxWidth().testTag("home-total-CNY"))
+                totals.filterKeys { it != "CNY" }.forEach { (currency, amount) ->
+                    Text("另有 ${Money.display(amount, currency)} · 单独统计", color = Gold, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
+                }
+                Text("$soon 笔近期到期 · 未来 7 天（含今天）", color = Color(0xFFB7C1C4), fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 8.dp))
             }
         }
         item {
-            Row(Modifier.padding(horizontal = 24.dp, vertical = 22.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("我的账单", fontSize = 21.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Row(Modifier.padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("我的账单", fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Text("按还款日排序", fontSize = 11.sp, color = Muted)
             }
         }
-        items(shown, key = { it.statement.id }) { bill ->
+        items(overview.bills, key = { it.statement.id }) { bill ->
             BillCard(bill, today, onOpen = { onOpen(bill.statement.id) }, onPay = { onPay(bill.statement.id) })
         }
         item {
@@ -183,41 +184,34 @@ private fun HomeScreen(bills: List<Bill>, today: LocalDate, modifier: Modifier, 
 private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: () -> Unit) {
     val s = bill.statement
     val urgent = !bill.settled && BillingRules.daysUntil(LocalDate.parse(s.dueDate), today) <= 3
-    Card(onClick = onOpen, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
-        Column(Modifier.padding(18.dp)) {
+    Card(onClick = onOpen, modifier = Modifier.testTag("home-bill-${s.id}").fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                BankBadge(s.bankMark, Color(s.color))
-                Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                    Text(s.bank, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("尾号 ${s.cardTails}", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp))
+                BankBadge(s.bankMark, Color(s.color), compact = true)
+                Column(Modifier.weight(1f).padding(start = 8.dp)) {
+                    Text(s.bank, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, lineHeight = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("尾号 ${s.cardTails} · ${s.cycle}", color = Muted, fontSize = 11.sp, lineHeight = 16.sp, maxLines = 1, modifier = Modifier.fillMaxWidth().testTag("home-cards-${s.id}"))
                 }
                 Icon(Icons.Outlined.ChevronRight, contentDescription = "查看账单", tint = Muted, modifier = Modifier.size(20.dp))
             }
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(Money.display(bill.remaining, s.currency), fontSize = 25.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp)
-                    Text(if (bill.settled) "已记录还清" else "待还 · ${s.cycle} 账单", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp))
-                }
-                if (!bill.settled) Button(onClick = onPay, colors = ButtonDefaults.buttonColors(containerColor = Gold.copy(alpha = 0.28f), contentColor = Ink), contentPadding = PaddingValues(horizontal = 15.dp)) {
+                Text(Money.display(bill.remaining, s.currency), fontSize = 23.sp, lineHeight = 30.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.5).sp, modifier = Modifier.weight(1f).testTag("home-remaining-${s.id}"))
+                Spacer(Modifier.width(8.dp))
+                if (!bill.settled) Button(onClick = onPay, modifier = Modifier.testTag("home-pay-${s.id}").defaultMinSize(minHeight = 48.dp), colors = ButtonDefaults.buttonColors(containerColor = Gold.copy(alpha = 0.28f), contentColor = Ink), contentPadding = PaddingValues(horizontal = 12.dp)) {
                     Text("记录还款", fontSize = 12.sp)
                 } else Icon(Icons.Outlined.CheckCircle, contentDescription = "已记录还清", tint = Green)
             }
-            Spacer(Modifier.height(17.dp))
-            HorizontalDivider(color = Line)
-            Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(BillingRules.dueLabel(LocalDate.parse(s.dueDate), today, bill.settled), color = if (bill.settled) Green else if (urgent) Red else Ink, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                Text("还款日 ${s.dueDate}", fontSize = 11.sp, color = Muted)
-            }
-            if (s.cardTails.contains("·")) Text("多卡共用账单 · 金额仅统计一次", color = Green, fontSize = 10.sp, modifier = Modifier.padding(top = 8.dp))
+            Text("${BillingRules.dueLabel(LocalDate.parse(s.dueDate), today, bill.settled)} · 还款日 ${s.dueDate}", color = if (bill.settled) Green else if (urgent) Red else Muted, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, modifier = Modifier.fillMaxWidth().testTag("home-due-${s.id}"))
+            if (s.cardTails.contains("·")) Text("多卡共用账单 · 金额仅统计一次", color = Green, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
         }
     }
 }
 
 @Composable
-private fun BankBadge(mark: String, color: Color) {
-    Box(Modifier.size(38.dp).clip(CircleShape).background(color.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
-        Text(mark, color = color, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+private fun BankBadge(mark: String, color: Color, compact: Boolean = false) {
+    Box(Modifier.size(if (compact) 30.dp else 38.dp).clip(CircleShape).background(color.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
+        Text(mark, color = color, fontWeight = FontWeight.Bold, fontSize = if (compact) 16.sp else 18.sp)
     }
 }
 
@@ -237,18 +231,17 @@ private fun PageHeader(title: String, subtitle: String, onBack: (() -> Unit)? = 
 }
 
 @Composable
-private fun HistoryScreen(bills: List<Bill>, modifier: Modifier, onOpen: (String) -> Unit) {
-    var filter by rememberSaveable { mutableIntStateOf(0) }
+private fun HistoryScreen(bills: List<Bill>, filter: Int, modifier: Modifier, onFilter: (Int) -> Unit, onOpen: (String) -> Unit) {
     val filtered = bills.filter { filter == 0 || (filter == 1 && !it.settled) || (filter == 2 && it.settled) }.sortedByDescending { it.statement.dueDate }
     Column(modifier) {
         PageHeader("账单历史", "每期账单，都有迹可循")
-        Row(Modifier.padding(horizontal = 20.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("全部", "待还", "已记录还清").forEachIndexed { index, title -> FilterChip(selected = filter == index, onClick = { filter = index }, label = { Text(title) }) }
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("全部", "待还", "已记录还清").forEachIndexed { index, title -> FilterChip(modifier = Modifier.testTag("history-filter-$index"), selected = filter == index, onClick = { onFilter(index) }, label = { Text(title) }) }
         }
         LazyColumn(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (filtered.isEmpty()) item { Text("暂时没有这类账单", color = Muted, modifier = Modifier.padding(24.dp)) }
             items(filtered, key = { it.statement.id }) { bill ->
-                Card(onClick = { onOpen(bill.statement.id) }, colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+                Card(onClick = { onOpen(bill.statement.id) }, modifier = Modifier.testTag("history-bill-${bill.statement.id}"), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
                     Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                         BankBadge(bill.statement.bankMark, Color(bill.statement.color))
                         Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
@@ -277,10 +270,10 @@ private fun DetailScreen(bill: Bill, today: LocalDate, busy: Boolean, modifier: 
                 Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(22.dp)) {
                     Column(Modifier.fillMaxWidth().padding(22.dp)) {
                         Text("当前待还 · ${s.currency}", color = Muted, fontSize = 13.sp)
-                        Text(Money.display(bill.remaining, s.currency), fontSize = 35.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 8.dp))
+                        Text(Money.display(bill.remaining, s.currency), fontSize = 35.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag("detail-remaining").padding(vertical = 8.dp))
                         Text(BillingRules.dueLabel(LocalDate.parse(s.dueDate), today, bill.settled), color = if (bill.settled) Green else Red, fontSize = 13.sp)
                         Spacer(Modifier.height(20.dp))
-                        Button(onClick = onPay, enabled = !bill.settled && !busy, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink)) {
+                        Button(onClick = onPay, enabled = !bill.settled && !busy, modifier = Modifier.testTag("detail-pay").fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink)) {
                             Text(if (bill.settled) "已记录还清" else "记录还款", modifier = Modifier.padding(vertical = 5.dp))
                         }
                         Text("仅记录你已完成的还款，不执行银行转账。", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 10.dp))
@@ -311,7 +304,7 @@ private fun DetailScreen(bill: Bill, today: LocalDate, busy: Boolean, modifier: 
         onDismissRequest = { voidId = null }, title = { Text("撤销这笔记录？") },
         text = { Text("撤销后将重新计算待还金额，原记录会保留并标注已撤销。这不会撤回任何银行交易。") },
         dismissButton = { TextButton(onClick = { voidId = null }) { Text("保留记录") } },
-        confirmButton = { TextButton(onClick = { voidId?.let(onVoid); voidId = null }, enabled = !busy) { Text("撤销记录", color = Red) } },
+        confirmButton = { TextButton(onClick = { voidId?.let(onVoid); voidId = null }, enabled = !busy, modifier = Modifier.testTag("void-confirm")) { Text("撤销记录", color = Red) } },
     )
 }
 
@@ -325,8 +318,8 @@ private fun PaymentRow(payment: Payment, currency: String, busy: Boolean, onVoid
                 Text(date, fontSize = 11.sp, color = Muted, modifier = Modifier.padding(top = 5.dp))
                 if (payment.note.isNotBlank()) Text(payment.note, fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 5.dp))
             }
-            if (payment.voidedAt != null) Text("已撤销", fontSize = 12.sp, color = Muted)
-            else TextButton(onClick = onVoid, enabled = !busy) { Text("撤销") }
+            if (payment.voidedAt != null) Text("已撤销", fontSize = 12.sp, color = Muted, modifier = Modifier.testTag("payment-voided-${payment.id}"))
+            else TextButton(onClick = onVoid, enabled = !busy, modifier = Modifier.testTag("payment-void-${payment.id}")) { Text("撤销") }
         }
     }
 }
@@ -341,21 +334,21 @@ private fun PaymentDialog(bill: Bill, busy: Boolean, onDismiss: () -> Unit, onCo
         onDismissRequest = onDismiss,
         title = { Text("记录还款") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("${bill.statement.bank} · ${bill.statement.currency}\n待还 ${Money.display(bill.remaining, bill.statement.currency)}", color = Muted, lineHeight = 22.sp)
                 Spacer(Modifier.height(16.dp))
                 OutlinedTextField(value = amount, onValueChange = { amount = it }, label = { Text("已还金额") }, singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), enabled = !busy,
-                    isError = !valid && amount.isNotEmpty(), modifier = Modifier.fillMaxWidth(),
+                    isError = !valid && amount.isNotEmpty(), modifier = Modifier.testTag("payment-amount").fillMaxWidth(),
                     supportingText = { Text(if (parsed != null && parsed > bill.remaining) "不能超过当前待还金额" else "支持部分还款，最多两位小数") })
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(value = note, onValueChange = { if (it.length <= 120) note = it }, label = { Text("备注（选填）") }, enabled = !busy,
-                    modifier = Modifier.fillMaxWidth(), maxLines = 3)
+                    modifier = Modifier.testTag("payment-note").fillMaxWidth(), maxLines = 3)
                 Text("确认前请核实银行实际还款情况。", fontSize = 11.sp, color = Muted, modifier = Modifier.padding(top = 14.dp))
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") } },
-        confirmButton = { Button(onClick = { parsed?.let { onConfirm(it, note) } }, enabled = valid && !busy) { Text(if (busy) "保存中…" else "保存记录") } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.testTag("payment-cancel")) { Text("取消") } },
+        confirmButton = { Button(onClick = { parsed?.let { onConfirm(it, note) } }, enabled = valid && !busy, modifier = Modifier.testTag("payment-save")) { Text(if (busy) "保存中…" else "保存记录") } },
     )
 }
 

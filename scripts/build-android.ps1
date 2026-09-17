@@ -2,6 +2,7 @@ param(
     [string]$JavaHome,
     [string]$AndroidHome,
     [switch]$UseMirror,
+    [switch]$NoDaemon,
     [switch]$DeviceTests
 )
 $ErrorActionPreference = 'Stop'
@@ -45,12 +46,15 @@ if ($UseMirror) {
         Set-Content -LiteralPath $checksumFile -Value $expected -Encoding ascii
     }
 }
+$gradleOptions = @('--console=plain')
+# A daemon started in a restricted session can retain its network restrictions.
+if ($NoDaemon) { $gradleOptions += '--no-daemon' }
 Push-Location $androidProject
 try {
-    & $gradleExe testDebugUnitTest lintDebug assembleDebug --console=plain
+    & $gradleExe testDebugUnitTest lintDebug assembleDebug @gradleOptions
     if ($LASTEXITCODE -ne 0) { throw 'Android build or verification failed.' }
     if ($DeviceTests) {
-        & $gradleExe connectedDebugAndroidTest --console=plain
+        & $gradleExe connectedDebugAndroidTest @gradleOptions
         if ($LASTEXITCODE -ne 0) { throw 'Device tests failed.' }
     }
     Write-Host "APK: $(Join-Path $androidProject 'app\build\outputs\apk\debug\app-debug.apk')"
