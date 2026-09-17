@@ -47,3 +47,32 @@
 ### 2026-09-16
 
 当日状态：源码已编写，Android 构建与安装验收尚未完成。后台 `python -m pytest -q` 14 项通过。
+
+
+## 2026-09-17 S1-01/02/03 验收通过
+
+### 数据库连接与迁移
+
+- PostgreSQL 18.0 (aarch64-unknown-linux-gnu) 远程连接成功。
+- Alembic 迁移 `0001` 执行成功，创建 accounts、cards、statements、statement_versions、payments 共 5 张表。
+- 所有金额字段使用 `BigInteger`，整数最小货币单位存储，不使用浮点数。
+
+### 模型约束测试（14 项全部通过）
+
+- **AccountCard (3 项)**：创建账户、卡片关联、无效外键被拒。
+- **StatementVersion (7 项)**：创建账单与版本、金额整数回读验证、同账户同币种同账期唯一约束、due_date < statement_date 被拒、负金额被拒、最低还款超总额被拒、版本号唯一约束。
+- **Payment (4 项)**：记录还款、撤销还款保留审计、零金额被拒、多币种独立记录。
+
+### 全量测试
+
+- `python -m pytest -q`：28 passed, 0 failed, 0 skipped (14 API/contract + 14 model)。
+
+### 新增文件
+
+- `backend/cardcue_api/config.py` — Pydantic Settings
+- `backend/cardcue_api/persistence/models.py` — 5 个 SQLAlchemy 模型
+- `backend/cardcue_api/persistence/database.py` — 异步/同步引擎
+- `backend/cardcue_api/migrations/` — Alembic 配置与初始迁移
+- `backend/tests/test_models.py` — 14 项约束测试
+- `backend/.env.example` — 连接串模板
+- `backend/pyproject.toml` — 新增数据库相关依赖
