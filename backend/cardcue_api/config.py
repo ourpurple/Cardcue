@@ -1,4 +1,4 @@
-﻿"""Application settings loaded from environment / .env file."""
+"""Application settings loaded from environment / .env file."""
 
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     mail_encryption_key: str = "cardcue-secret-key-32-bytes-long!"
     mail_storage_dir: str = str(_BASE_DIR / "data" / "mail_storage")
     mail_check_interval_minutes: int = 30
+
+    # LLM statement extraction settings
+    llm_api_key: str | None = None
+    llm_base_url: str = "https://api.deepseek.com/v1"
+    llm_model: str = "deepseek-chat"
 
 
 settings = Settings()

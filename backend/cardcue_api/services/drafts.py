@@ -18,6 +18,7 @@ from cardcue_api.domain.schemas import (
 from cardcue_api.mail.parser import MailMimeParser
 from cardcue_api.mail.storage import MailStorageManager
 from cardcue_api.parsing.html_extractor import HtmlStatementExtractor
+from cardcue_api.parsing.model_adapter import ModelStatementExtractor
 from cardcue_api.parsing.pdf_extractor import PdfStatementExtractor
 from cardcue_api.persistence import (
     Account,
@@ -39,6 +40,7 @@ class DraftService:
         self.storage_manager = storage_manager or MailStorageManager()
         self.html_extractor = HtmlStatementExtractor()
         self.pdf_extractor = PdfStatementExtractor()
+        self.model_extractor = ModelStatementExtractor()
         self.mime_parser = MailMimeParser()
 
     async def _log_change(
@@ -97,66 +99,61 @@ class DraftService:
         if not source:
             raise NotFoundError(f"EmailSource {source_id} not found")
 
-        extractor_name = "rule"
-        extracted_draft = None
-
         # 1. Check for PDF attachments first
+        pdf_text = ""
+        has_encrypted_pdf = False
         pdf_attachments = [att for att in source.attachments if att.filename.lower().endswith(".pdf")]
         if pdf_attachments:
-            # Process the first valid PDF
             for att in pdf_attachments:
                 if os.path.exists(att.storage_path):
-                    extracted_draft = self.pdf_extractor.extract_from_path(
-                        file_path=att.storage_path,
-                        filename=att.filename,
-                        subject=source.subject,
-                        sender=source.sender,
-                        email_date=source.email_date.date() if source.email_date else None,
-                    )
-                    extractor_name = "pdf"
-                    break
+                    txt = self.pdf_extractor.get_text_from_path(att.storage_path)
+                    if txt and txt.strip():
+                        pdf_text = txt
+                        break
+                    else:
+                        check_draft = self.pdf_extractor.extract_from_path(att.storage_path)
+                        if "attachment_password_required" in check_draft.review_reasons:
+                            has_encrypted_pdf = True
 
-        # 2. If no PDF attachment or PDF required OCR / had no selectable text, parse email body
-        if not extracted_draft or "ocr_required_scanned_pdf" in extracted_draft.review_reasons:
-            email_body_text = ""
-            is_html = True
+        # 2. Extract HTML or plain text from email body
+        email_body_text = ""
+        if source.raw_storage_path and os.path.exists(source.raw_storage_path):
+            try:
+                with open(source.raw_storage_path, "rb") as f:
+                    raw_bytes = f.read()
+                parsed_email = self.mime_parser.parse_bytes(raw_bytes)
+                if parsed_email.body_html:
+                    email_body_text = self.html_extractor.html_to_text(parsed_email.body_html)
+                elif parsed_email.body_plain:
+                    email_body_text = parsed_email.body_plain
+            except Exception:
+                pass
 
-            if source.raw_storage_path and os.path.exists(source.raw_storage_path):
-                try:
-                    with open(source.raw_storage_path, "rb") as f:
-                        raw_bytes = f.read()
-                    parsed_email = self.mime_parser.parse_bytes(raw_bytes)
-                    if parsed_email.body_html:
-                        email_body_text = parsed_email.body_html
-                        is_html = True
-                    elif parsed_email.body_plain:
-                        email_body_text = parsed_email.body_plain
-                        is_html = False
-                except Exception:
-                    pass
+        # 3. Choose primary text for extraction: prefer PDF text if non-empty, else email body
+        text_to_extract = pdf_text.strip() if pdf_text.strip() else email_body_text.strip()
 
-            if email_body_text:
-                html_draft = self.html_extractor.extract(
-                    content=email_body_text,
-                    is_html=is_html,
-                    subject=source.subject,
-                    sender=source.sender,
-                    email_date=source.email_date.date() if source.email_date else None,
-                )
-                if not extracted_draft or not extracted_draft.amount_minor:
-                    extracted_draft = html_draft
-                    extractor_name = "html"
-
-        if not extracted_draft:
-            # Empty fallback if nothing could be read
+        # 4. Extract statement using model extractor (LLM if configured, rule fallback otherwise)
+        if text_to_extract:
+            extracted_draft, extractor_name = await self.model_extractor.extract(
+                text=text_to_extract,
+                subject=source.subject or "",
+                sender=source.sender or "",
+                email_date=source.email_date.date() if source.email_date else None,
+            )
+        else:
             extracted_draft = self.html_extractor.extract(
                 content="",
                 is_html=False,
-                subject=source.subject,
-                sender=source.sender,
+                subject=source.subject or "",
+                sender=source.sender or "",
                 email_date=source.email_date.date() if source.email_date else None,
             )
             extractor_name = "rule:empty"
+
+        if has_encrypted_pdf and "attachment_password_required" not in extracted_draft.review_reasons:
+            reasons = list(extracted_draft.review_reasons)
+            reasons.append("attachment_password_required")
+            extracted_draft.review_reasons = list(dict.fromkeys(reasons))
 
         # 3. Account and Card matching in database
         matched_account_id = None
@@ -431,16 +428,19 @@ class DraftService:
         self,
         session: AsyncSession,
         limit: int = 50,
+        reparse: bool = False,
     ) -> list[StatementDraftModel]:
-        """Parse all pending statement candidate EmailSources."""
+        """Parse all pending statement candidate EmailSources.
+
+        If reparse=True, re-evaluates all statement candidates regardless of parse_status.
+        """
+        conditions = [EmailSource.is_statement_candidate.is_(True)]
+        if not reparse:
+            conditions.append(EmailSource.parse_status == "pending")
+
         stmt = (
             select(EmailSource)
-            .where(
-                and_(
-                    EmailSource.is_statement_candidate.is_(True),
-                    EmailSource.parse_status == "pending",
-                )
-            )
+            .where(and_(*conditions))
             .limit(limit)
         )
         sources = list((await session.execute(stmt)).scalars().all())

@@ -126,7 +126,8 @@ async def parse_email_source(
 @router.post("/parse-all-pending", response_model=list[StatementDraftOut])
 async def parse_all_pending(
     limit: int = Query(default=50, ge=1, le=100),
+    reparse: bool = Query(default=False, description="Whether to reparse already processed email candidates"),
     session: AsyncSession = Depends(get_session),
 ):
     """Trigger parsing of all pending statement candidate email sources."""
-    return await svc.parse_all_pending(session, limit=limit)
+    return await svc.parse_all_pending(session, limit=limit, reparse=reparse)

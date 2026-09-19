@@ -19,6 +19,42 @@ class PdfStatementExtractor:
         self.max_pages = max_pages
         self.text_extractor = HtmlStatementExtractor()
 
+    def get_text_from_path(self, file_path: str) -> str:
+        """Extract clean plain text from local PDF file without parsing into StatementDraft."""
+        if not os.path.exists(file_path) or os.path.getsize(file_path) > MAX_PDF_SIZE_BYTES:
+            return ""
+        try:
+            doc = fitz.open(file_path)
+            return self._extract_text_from_doc(doc)
+        except Exception:
+            return ""
+
+    def get_text_from_bytes(self, pdf_bytes: bytes) -> str:
+        """Extract clean plain text from raw PDF bytes without parsing into StatementDraft."""
+        if len(pdf_bytes) > MAX_PDF_SIZE_BYTES:
+            return ""
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            return self._extract_text_from_doc(doc)
+        except Exception:
+            return ""
+
+    def _extract_text_from_doc(self, doc: fitz.Document) -> str:
+        try:
+            if doc.is_encrypted:
+                return ""
+            page_count = doc.page_count
+            pages_to_read = min(page_count, self.max_pages)
+            extracted_pages_text: list[str] = []
+            for i in range(pages_to_read):
+                page = doc.load_page(i)
+                text = page.get_text("text")
+                if text:
+                    extracted_pages_text.append(f"--- Page {i+1} ---\n" + text)
+            return "\n\n".join(extracted_pages_text)
+        finally:
+            doc.close()
+
     def extract_from_bytes(
         self,
         pdf_bytes: bytes,

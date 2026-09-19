@@ -13,7 +13,7 @@ from cardcue_api.parsing.evidence import (
     sanitize_text,
 )
 from cardcue_api.parsing.html_extractor import HtmlStatementExtractor
-from cardcue_api.parsing.model_adapter import ModelStatementExtractor
+from cardcue_api.parsing.model_adapter import ModelStatementExtractor, parse_model_response
 from cardcue_api.parsing.pdf_extractor import PdfStatementExtractor
 
 
@@ -309,3 +309,123 @@ def test_storage_expiration_and_cleanup(tmp_path):
     assert storage.is_file_available(p) is False
     with pytest.raises(MailStorageError):
         storage.read_file(p)
+
+
+# ---------------------------------------------------------------------------
+# parse_model_response Unit Tests
+# ---------------------------------------------------------------------------
+
+def test_parse_model_response_clean_json():
+    raw_output = """
+    {
+      "bank": "招商银行",
+      "account_reference": "CMB_001",
+      "card_tails": ["1234", "5678"],
+      "currency": "CNY",
+      "amount_minor": 1582050,
+      "minimum_minor": 158200,
+      "statement_date": "2026-09-18",
+      "due_date": "2026-10-06",
+      "evidence": [
+        {"field": "amount_minor", "excerpt": "本期应还金额：￥15,820.50"},
+        {"field": "due_date", "excerpt": "到期还款日：2026-10-06"}
+      ]
+    }
+    """
+    draft = parse_model_response(raw_output)
+    assert draft.bank == "招商银行"
+    assert draft.account_reference == "CMB_001"
+    assert draft.card_tails == ["1234", "5678"]
+    assert draft.currency == "CNY"
+    assert draft.amount_minor == 1582050
+    assert draft.minimum_minor == 158200
+    assert draft.statement_date == date(2026, 9, 18)
+    assert draft.due_date == date(2026, 10, 6)
+    assert len(draft.evidence) == 2
+    assert draft.evidence[0].field == "amount_minor"
+
+
+def test_parse_model_response_markdown_fence_and_chatter():
+    raw_output = """
+    Here is the extracted credit card statement JSON:
+    ```json
+    {
+      "bank": "中国建设银行",
+      "card_tails": ["9988"],
+      "currency": "CNY",
+      "amount_minor": 320000,
+      "minimum_minor": 32000,
+      "statement_date": "2026-09-15",
+      "due_date": "2026-10-05",
+      "evidence": [
+        {"field": "bank", "excerpt": "中国建设银行信用卡对账单"}
+      ]
+    }
+    ```
+    Hope this helps!
+    """
+    draft = parse_model_response(raw_output)
+    assert draft.bank == "中国建设银行"
+    assert draft.card_tails == ["9988"]
+    assert draft.amount_minor == 320000
+    assert draft.statement_date == date(2026, 9, 15)
+
+
+def test_parse_model_response_float_and_formatted_amounts():
+    raw_output = """
+    {
+      "bank": "交通银行",
+      "card_tails": ["8369"],
+      "currency": "CNY",
+      "amount_minor": 8800.50,
+      "minimum_minor": "￥880.05",
+      "statement_date": "2026-09-10",
+      "due_date": "2026-10-03"
+    }
+    """
+    draft = parse_model_response(raw_output)
+    assert draft.bank == "交通银行"
+    assert draft.amount_minor == 880050
+    assert draft.minimum_minor == 88005
+
+
+def test_parse_model_response_missing_fields_are_none():
+    raw_output = """
+    {
+      "bank": "未知银行",
+      "card_tails": [],
+      "currency": null,
+      "amount_minor": null,
+      "minimum_minor": null,
+      "statement_date": null,
+      "due_date": null
+    }
+    """
+    draft = parse_model_response(raw_output)
+    assert draft.amount_minor is None
+    assert draft.minimum_minor is None
+    assert draft.statement_date is None
+    assert draft.due_date is None
+
+
+def test_parse_model_response_infer_year_from_email_date():
+    raw_output = """
+    {
+      "bank": "农业银行",
+      "card_tails": ["8753"],
+      "currency": "CNY",
+      "amount_minor": 120000,
+      "statement_date": "09月10日",
+      "due_date": "10月05日"
+    }
+    """
+    draft = parse_model_response(raw_output, email_date=date(2026, 9, 11))
+    assert draft.bank == "农业银行"
+    assert draft.statement_date == date(2026, 9, 10)
+    assert draft.due_date == date(2026, 10, 5)
+
+
+def test_parse_model_response_invalid_json_raises():
+    import json
+    with pytest.raises((json.JSONDecodeError, ValueError)):
+        parse_model_response("This is not JSON content at all")

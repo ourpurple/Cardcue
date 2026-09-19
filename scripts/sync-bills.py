@@ -212,6 +212,8 @@ def main():
     parser.add_argument("--since-days", type=int, default=60, help="拉取近多少天的账单邮件 (默认: 60天，即近2个月)")
     parser.add_argument("--demo", action="store_true", help="直接生成并入库近两个月的仿真账单数据")
     parser.add_argument("--auto-confirm", action="store_true", default=True, help="解析草稿后自动确认入库")
+    parser.add_argument("--reparse", action="store_true", help="重新解析所有已抓取的候选邮件（使用大模型/最新解析引擎，即使之前已解析过）")
+    parser.add_argument("--skip-imap", action="store_true", help="跳过 IMAP 邮件拉取步骤，直接对已有邮件执行解析入库")
     args = parser.parse_args()
 
     if args.clean:
@@ -235,91 +237,97 @@ def main():
         print("现在打开手机 App 点击同步，即可看到近两个月的完整账单数据。")
         return
 
-    email_address = args.email
-    if not email_address:
-        print("提示: 若要直接生成近两个月仿真账单进行手机测试，可运行: python scripts/sync-bills.py --demo")
-        email_address = input("请输入要绑定的邮箱地址 (例如 your_name@qq.com，直接回车取消): ").strip()
+    if not args.skip_imap:
+        email_address = args.email
         if not email_address:
-            print("操作已取消。")
-            return
+            print("提示: 若要直接生成近两个月仿真账单进行手机测试，可运行: python scripts/sync-bills.py --demo")
+            print("提示: 若仅需重新解析已拉取的邮件，可添加参数: --skip-imap --reparse")
+            email_address = input("请输入要绑定的邮箱地址 (例如 your_name@qq.com，直接回车取消): ").strip()
+            if not email_address:
+                print("操作已取消。")
+                return
 
-    existing_mbs = request(f"{server}/v1/mailboxes")
-    target_mb = next((m for m in existing_mbs if m.get("email_address") == email_address), None)
+        existing_mbs = request(f"{server}/v1/mailboxes")
+        target_mb = next((m for m in existing_mbs if m.get("email_address") == email_address), None)
 
-    auth_code = args.auth_code
-    mb_id = None
+        auth_code = args.auth_code
+        mb_id = None
 
-    if target_mb and not auth_code:
-        reuse = input(f"检测到邮箱 {email_address} 已存在于系统中，是否直接使用已有配置同步？[Y/n]: ").strip().lower()
-        if reuse != "n":
-            mb_id = target_mb["id"]
-            print(f"[OK] 直接使用已有邮箱配置 (ID: {mb_id})")
-        else:
+        if target_mb and not auth_code:
+            reuse = input(f"检测到邮箱 {email_address} 已存在于系统中，是否直接使用已有配置同步？[Y/n]: ").strip().lower()
+            if reuse != "n":
+                mb_id = target_mb["id"]
+                print(f"[OK] 直接使用已有邮箱配置 (ID: {mb_id})")
+            else:
+                auth_code = getpass.getpass("请输入该邮箱的 IMAP 授权码 (输入时不显示字符): ").strip()
+                if not auth_code:
+                    print("未输入授权码，操作已取消。")
+                    return
+        elif not auth_code:
             auth_code = getpass.getpass("请输入该邮箱的 IMAP 授权码 (输入时不显示字符): ").strip()
             if not auth_code:
                 print("未输入授权码，操作已取消。")
                 return
-    elif not auth_code:
-        auth_code = getpass.getpass("请输入该邮箱的 IMAP 授权码 (输入时不显示字符): ").strip()
-        if not auth_code:
-            print("未输入授权码，操作已取消。")
-            return
 
-    if auth_code:
-        imap_host = args.imap_host
-        if not imap_host:
-            guessed_host, guessed_port, guessed_ssl = guess_imap_host(email_address)
-            imap_host = guessed_host
-            print(f"自动识别 IMAP 服务器: {imap_host}:{args.imap_port}")
+        if auth_code:
+            imap_host = args.imap_host
+            if not imap_host:
+                guessed_host, guessed_port, guessed_ssl = guess_imap_host(email_address)
+                imap_host = guessed_host
+                print(f"自动识别 IMAP 服务器: {imap_host}:{args.imap_port}")
 
-        print(f"\n正在配置邮箱账户 {email_address} ...")
-        mb_payload = {
-            "email_address": email_address,
-            "imap_host": imap_host,
-            "imap_port": args.imap_port,
-            "use_ssl": True,
-            "auth_token": auth_code,
-            "check_interval_minutes": 30,
+            print(f"\n正在配置邮箱账户 {email_address} ...")
+            mb_payload = {
+                "email_address": email_address,
+                "imap_host": imap_host,
+                "imap_port": args.imap_port,
+                "use_ssl": True,
+                "auth_token": auth_code,
+                "check_interval_minutes": 30,
+            }
+            try:
+                mb = request(f"{server}/v1/mailboxes", method="POST", data=mb_payload)
+                mb_id = mb["id"]
+                print(f"[OK] 邮箱已成功注册入库 (ID: {mb_id})")
+            except RuntimeError as e:
+                if "already exists" in str(e) or "409" in str(e):
+                    mbs = request(f"{server}/v1/mailboxes")
+                    target = next((m for m in mbs if m["email_address"] == email_address), None)
+                    if target:
+                        mb_id = target["id"]
+                        request(f"{server}/v1/mailboxes/{mb_id}", method="PATCH", data={"auth_token": auth_code})
+                        print(f"[OK] 邮箱已存在，更新授权凭证成功 (ID: {mb_id})")
+                    else:
+                        print(f"[FAIL] 获取已有邮箱失败: {e}")
+                        sys.exit(1)
+                else:
+                    print(f"[FAIL] 邮箱注册失败: {e}")
+                    sys.exit(1)
+
+        # 3. Trigger IMAP sync for the last N days
+        print(f"\n正在通过 IMAP 拉取近 {args.since_days} 天 (约2个月) 的账单邮件...")
+        sync_data = {
+            "mailbox_id": mb_id,
+            "since_days": args.since_days,
         }
         try:
-            mb = request(f"{server}/v1/mailboxes", method="POST", data=mb_payload)
-            mb_id = mb["id"]
-            print(f"[OK] 邮箱已成功注册入库 (ID: {mb_id})")
+            sync_resp = request(f"{server}/v1/mail/sync-now", method="POST", data=sync_data, timeout=180)
         except RuntimeError as e:
-            if "already exists" in str(e) or "409" in str(e):
-                mbs = request(f"{server}/v1/mailboxes")
-                target = next((m for m in mbs if m["email_address"] == email_address), None)
-                if target:
-                    mb_id = target["id"]
-                    request(f"{server}/v1/mailboxes/{mb_id}", method="PATCH", data={"auth_token": auth_code})
-                    print(f"[OK] 邮箱已存在，更新授权凭证成功 (ID: {mb_id})")
-                else:
-                    print(f"[FAIL] 获取已有邮箱失败: {e}")
-                    sys.exit(1)
+            if "extra_forbidden" in str(e) or "since_days" in str(e):
+                print("[提示] 远程 VPS 后端运行的是基础镜像，尚未更新 since_days 过滤参数支持。")
+                print("       正在自动降级为标准拉取（拉取所有未同步邮件）...")
+                sync_resp = request(f"{server}/v1/mail/sync-now", method="POST", data={"mailbox_id": mb_id}, timeout=300)
             else:
-                print(f"[FAIL] 邮箱注册失败: {e}")
-                sys.exit(1)
-
-    # 3. Trigger IMAP sync for the last N days
-    print(f"\n正在通过 IMAP 拉取近 {args.since_days} 天 (约2个月) 的账单邮件...")
-    sync_data = {
-        "mailbox_id": mb_id,
-        "since_days": args.since_days,
-    }
-    try:
-        sync_resp = request(f"{server}/v1/mail/sync-now", method="POST", data=sync_data, timeout=180)
-    except RuntimeError as e:
-        if "extra_forbidden" in str(e) or "since_days" in str(e):
-            print("[提示] 远程 VPS 后端运行的是基础镜像，尚未更新 since_days 过滤参数支持。")
-            print("       正在自动降级为标准拉取（拉取所有未同步邮件）...")
-            sync_resp = request(f"{server}/v1/mail/sync-now", method="POST", data={"mailbox_id": mb_id}, timeout=300)
-        else:
-            raise
-    print(f"[OK] 邮件抓取任务已完成: {sync_resp.get('message')}")
+                raise
+        print(f"[OK] 邮件抓取任务已完成: {sync_resp.get('message')}")
+    else:
+        print("\n[提示] 已指定 --skip-imap，跳过 IMAP 邮件拉取阶段，直接解析入库现有邮件...")
 
     # 4. Parse pending email drafts
-    print("\n正在启动解析引擎解析邮件草稿 (HTML/PDF)...")
-    parse_resp = request(f"{server}/v1/drafts/parse-all-pending", method="POST", timeout=180)
+    parse_param = "?reparse=true" if args.reparse else ""
+    engine_desc = "（使用大模型 / 最新解析引擎重新解析所有候选邮件）" if args.reparse else "（HTML/PDF）"
+    print(f"\n正在启动解析引擎解析邮件草稿 {engine_desc}...")
+    parse_resp = request(f"{server}/v1/drafts/parse-all-pending{parse_param}", method="POST", timeout=300)
     total_parsed = len(parse_resp) if isinstance(parse_resp, list) else parse_resp.get("total_parsed", 0)
     print(f"[OK] 解析完成，成功提取 {total_parsed} 份账单草稿")
 
@@ -384,6 +392,16 @@ def main():
                         print(f"  |-- 自动创建并绑定卡片: 尾号 {target_tail}")
                 except Exception as e:
                     print(f"  |-- [-] 绑定卡片跳过: {e}")
+
+            if d.get("amount_minor") is None:
+                print(f"[!] 草稿 {draft_id[:8]} 未识别出有效金额，需人工核实，跳过自动确认")
+                continue
+            if not d.get("statement_date") or not d.get("due_date"):
+                print(f"[!] 草稿 {draft_id[:8]} 缺少账单日或到期还款日，跳过自动确认")
+                continue
+            if str(d.get("due_date")) < str(d.get("statement_date")):
+                print(f"[!] 草稿 {draft_id[:8]} 到期还款日早于账单日，存在异常，跳过自动确认")
+                continue
 
             confirm_payload = {
                 "account_id": acct_id,

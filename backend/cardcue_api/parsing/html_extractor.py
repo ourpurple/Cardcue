@@ -87,6 +87,12 @@ class HtmlStatementExtractor:
             # Safely drop executable, styling and hidden tags
             for el in doc.xpath("//script|//style|//meta|//noscript|//iframe|//frame|//object|//embed"):
                 el.drop_tree()
+            for br in doc.xpath("//br"):
+                br.tail = "\n" + (br.tail or "")
+            for p in doc.xpath("//p|//div|//tr|//li|//h1|//h2|//h3|//h4|//h5|//h6"):
+                p.tail = "\n" + (p.tail or "")
+            for td in doc.xpath("//td|//th"):
+                td.tail = "\t" + (td.tail or "")
             text = doc.text_content()
             return sanitize_text(text)
         except Exception:
