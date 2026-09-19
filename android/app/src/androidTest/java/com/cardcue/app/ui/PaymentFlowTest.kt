@@ -1,5 +1,7 @@
-﻿package com.cardcue.app.ui
+package com.cardcue.app.ui
 
+import android.content.Context
+import android.view.inputmethod.InputMethodManager
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -31,6 +33,14 @@ class PaymentFlowTest {
         }
         compose.onNodeWithTag("bill-detail-list").performScrollToNode(hasTestTag("detail-remaining"))
         compose.onNodeWithTag("detail-remaining").assertTextEquals(text).assertIsDisplayed()
+    }
+
+    private fun closeKeyboard() {
+        compose.activityRule.scenario.onActivity { act ->
+            val imm = act.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            val view = act.currentFocus ?: act.window.decorView
+            imm?.hideSoftInputFromWindow(view.windowToken, 0)
+        }
     }
 
     @Test fun partialPaymentAndVoidRestoreBalanceAndKeepOriginalRecord() {
@@ -89,15 +99,20 @@ class PaymentFlowTest {
         openBill()
         compose.onNodeWithTag("detail-pay").performClick()
         compose.onNodeWithTag("payment-amount").performTextReplacement("12.34")
+        closeKeyboard()
         compose.activityRule.scenario.recreate()
+        closeKeyboard()
         compose.onNodeWithTag("payment-amount").assertTextContains("12.34")
         compose.onNodeWithTag("payment-cancel").performClick()
+        closeKeyboard()
+        compose.waitForIdle()
         compose.onNodeWithContentDescription("返回").performClick()
         compose.onNodeWithTag("tab-1").performClick()
         compose.onNodeWithTag("history-filter-2").performClick()
         compose.waitUntil(15_000) {
             compose.onAllNodesWithTag("history-bill-demo-old-bcm").fetchSemanticsNodes().isNotEmpty()
         }
+        compose.onNodeWithTag("history-bill-list").performScrollToNode(hasTestTag("history-bill-demo-old-bcm"))
         compose.onNodeWithTag("history-bill-demo-old-bcm").assertIsDisplayed().performClick()
         awaitBalance("¥0.00")
         compose.onNodeWithContentDescription("返回").performClick()

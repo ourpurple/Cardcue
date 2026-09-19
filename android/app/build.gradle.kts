@@ -12,8 +12,8 @@ android {
         applicationId = "com.cardcue.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         testInstrumentationRunner = "com.cardcue.app.testing.CardCueTestRunner"
     }
     buildTypes { release { isMinifyEnabled = false } }
@@ -51,3 +51,4 @@ dependencies {
 }
 
 kapt { arguments { arg("room.schemaLocation", "$projectDir/schemas") } }
+

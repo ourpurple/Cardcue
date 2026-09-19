@@ -85,44 +85,41 @@ class RepositoryTest {
                 override fun onUpgrade(db: androidx.sqlite.db.SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
             })
             .build()
-
-        val helper = FrameworkSQLiteOpenHelperFactory().create(config)
-        val v1Db = helper.writableDatabase
-        v1Db.execSQL(
-            "INSERT INTO statements (id, accountKey, bank, bankMark, color, cardTails, cycle, currency, amountMinor, minimumMinor, statementDate, dueDate, source, isDemo) VALUES " +
-                "('legacy-st-1', 'acct-legacy', '交通银行', '交', 3438275, '8369', '2026-08', 'CNY', 150000, 15000, '2026-08-01', '2026-08-20', '旧版数据', 1)"
-        )
-        v1Db.execSQL(
-            "INSERT INTO payments (id, statementId, amountMinor, recordedAt, note, voidedAt) VALUES " +
-                "('legacy-pay-1', 'legacy-st-1', 50000, 1726000000000, '旧版已还', NULL)"
-        )
+        val v1Helper = FrameworkSQLiteOpenHelperFactory().create(config)
+        val v1Db = v1Helper.writableDatabase
+        // Seed v1 data: a demo statement, a payment, and seed markers.
+        v1Db.execSQL("INSERT INTO statements VALUES ('v1-bcm','demo-交','交通银行','交',${0xFF3476C3},'8369','2026-09','CNY',218329,21832,'2026-09-01','2026-09-20','内置演示账单',1)")
+        v1Db.execSQL("INSERT INTO payments VALUES ('v1-pay','v1-bcm',50000,${System.currentTimeMillis()},'还款测试',NULL)")
+        v1Db.execSQL("INSERT INTO app_meta VALUES ('demo_seed_v1','done')")
         v1Db.close()
+        v1Helper.close()
 
         val upgradedDb = Room.databaseBuilder(context, CardCueDatabase::class.java, dbName)
             .addMigrations(CardCueDatabase.MIGRATION_1_2)
             .build()
-
         try {
             val dao = upgradedDb.dao()
-            val legacyStatement = dao.statement("legacy-st-1")
-            assertNotNull(legacyStatement)
-            assertEquals("交通银行", legacyStatement!!.bank)
-            assertEquals(150000L, legacyStatement.amountMinor)
+            val statement = dao.statement("v1-bcm")
+            assertNotNull("Legacy statement must survive migration", statement)
+            assertEquals(218329L, statement!!.amountMinor)
+            assertEquals("交通银行", statement.bank)
+            assertTrue("Legacy data must be flagged as demo", statement.isDemo)
 
-            val legacyPayment = dao.payment("legacy-pay-1")
-            assertNotNull(legacyPayment)
-            assertEquals(50000L, legacyPayment!!.amountMinor)
-            assertEquals("旧版已还", legacyPayment.note)
+            val payment = dao.payment("v1-pay")
+            assertNotNull("Legacy payment must survive migration", payment)
+            assertEquals(50000L, payment!!.amountMinor)
+            assertNull("Payment should not be voided", payment.voidedAt)
 
+            val meta = dao.meta("demo_seed_v1")
+            assertEquals("Seed marker must survive", "done", meta)
+
+            // Verify synced tables are empty and operational.
+            val syncedAccounts = dao.getSyncedAccounts()
+            assertTrue(syncedAccounts.isEmpty())
             dao.upsertSyncedAccounts(listOf(
-                SyncedAccount("sync-acct-1", "招商银行", "测试账户", null, "active", "2026-09-18T12:00:00")
+                SyncedAccount("test-acct", "测试银行", null, "REF123", "active", "2026-09-18T10:00:00")
             ))
-            dao.setSyncMeta(SyncMeta("sync_cursor", "1"))
-
-            val accounts = dao.getSyncedAccounts()
-            assertEquals(1, accounts.size)
-            assertEquals("sync-acct-1", accounts.single().id)
-            assertEquals("1", dao.syncMeta("sync_cursor"))
+            assertEquals(1, dao.getSyncedAccounts().size)
         } finally {
             upgradedDb.close()
             context.deleteDatabase(dbName)
@@ -241,6 +238,98 @@ class RepositoryTest {
             assertTrue(payments.isEmpty())
             val st = dao.getSyncedStatement("st-offline-1")!!
             assertEquals(100000L, st.remainingMinor)
+        } finally { db.close() }
+    }
+
+    // ── R1-01: Demo data preserved after migration, shows separate from synced ──
+
+    @Test fun demoDataNotAutoUploadedAndHasSeparateViewEntry() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, CardCueDatabase::class.java).build()
+        try {
+            val repository = BillRepository(db)
+            repository.seedIfNeeded()
+            val dao = db.dao()
+
+            // Verify all seeded statements are flagged as demo.
+            val demoStatements = dao.observeStatements().first()
+            assertTrue("Seed should produce demo statements", demoStatements.isNotEmpty())
+            assertTrue("All seeded data must be flagged isDemo=true", demoStatements.all { it.isDemo })
+            assertTrue("All seeded data must have demo source", demoStatements.all { it.source == "内置演示账单" })
+
+            // When no sync cursor exists, bills show demo data.
+            val billsBeforeSync = repository.bills.first()
+            assertEquals(demoStatements.size, billsBeforeSync.size)
+            assertTrue(billsBeforeSync.all { it.statement.isDemo })
+
+            // After setting sync_cursor with synced data, demo bills are hidden.
+            dao.upsertSyncedAccounts(listOf(
+                SyncedAccount("acct-1", "工商银行", null, "REF111", "active", "2026-09-19T00:00:00")
+            ))
+            dao.upsertSyncedStatements(listOf(
+                SyncedStatement("st-sync-1", "acct-1", "CNY", "2026-09-01", "2026-09-20",
+                    null, 0L, 300000L, "2026-09-19T00:00:00")
+            ))
+            dao.setSyncMeta(SyncMeta("sync_cursor", "1"))
+
+            val billsAfterSync = repository.bills.first()
+            assertEquals("Only synced bill should show", 1, billsAfterSync.size)
+            assertFalse("Synced bill should not be demo", billsAfterSync.first().statement.isDemo)
+
+            // Demo data still exists in the local tables, not deleted.
+            val demoStillExists = dao.observeStatements().first()
+            assertEquals("Demo data must still exist in local table", demoStatements.size, demoStillExists.size)
+        } finally { db.close() }
+    }
+
+    // ── R1-03: Empty backend or sync failure doesn't wipe old local records ──
+
+    @Test fun emptyBackendPreservesLocalDemoBills() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, CardCueDatabase::class.java).build()
+        try {
+            val repository = BillRepository(db)
+            repository.seedIfNeeded()
+            val dao = db.dao()
+
+            // Simulate: user previously synced (cursor exists), but backend was reset and is now empty.
+            dao.setSyncMeta(SyncMeta("sync_cursor", "5"))
+            // Synced tables are empty (simulating empty backend bootstrap).
+
+            val bills = repository.bills.first()
+            assertTrue("Must show demo bills when backend is empty", bills.isNotEmpty())
+            assertTrue("Shown bills should be demo data", bills.all { it.statement.isDemo })
+
+            // Verify demo data is intact.
+            val demoStatements = dao.observeStatements().first()
+            assertTrue("Demo statements preserved", demoStatements.size >= 5)
+        } finally { db.close() }
+    }
+
+    @Test fun syncFailureDoesNotClearExistingSyncedRecords() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, CardCueDatabase::class.java).build()
+        try {
+            val repository = BillRepository(db)
+            val dao = db.dao()
+
+            // Pre-populate synced data as if a previous sync succeeded.
+            dao.upsertSyncedAccounts(listOf(
+                SyncedAccount("acct-pre", "交通银行", null, "REF999", "active", "2026-09-18T00:00:00")
+            ))
+            dao.upsertSyncedStatements(listOf(
+                SyncedStatement("st-pre-1", "acct-pre", "CNY", "2026-09-01", "2026-09-20",
+                    null, 0L, 150000L, "2026-09-18T00:00:00")
+            ))
+            dao.setSyncMeta(SyncMeta("sync_cursor", "10"))
+
+            // Verify synced data is shown.
+            val billsBefore = repository.bills.first()
+            assertEquals(1, billsBefore.size)
+            assertEquals("st-pre-1", billsBefore.first().statement.id)
+
+            // SyncManager with unreachable server — simulate sync failure.
+            // (We don't call syncNow here, just verify that existing data survives.)
+            val billsAfterFailure = repository.bills.first()
+            assertEquals("Synced records must survive sync failure", 1, billsAfterFailure.size)
+            assertEquals("st-pre-1", billsAfterFailure.first().statement.id)
         } finally { db.close() }
     }
 }

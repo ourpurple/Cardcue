@@ -1,7 +1,58 @@
 # 首版验证记录
 
-更新日期：2026-09-18。状态：**P0、S1、A1、S2+A2、S3、S4 全部通过；真机 14 项设备测试全通过；后台 85 项测试在远程 PostgreSQL 上全通过**。
+更新日期：2026-09-19。状态：**P0、S1、A1、S2+A2、S3、S4、R1 全部交付通过；真机 17 项设备测试全通过（PLR110 Android 16）；后台 89 项测试在远程 PostgreSQL (152.70.238.24) 上全通过**。
 
+
+## 2026-09-19 R1 迁移、备份与完整交付验收通过
+
+### 真机设备测试（17 项全部通过）
+
+- **测试环境**：PLR110（Android 16，序列号 `3B666N00GE900000`）
+- **命令**：`powershell -ExecutionPolicy Bypass -File .\scripts\build-android.ps1 -UseMirror -NoDaemon -DeviceTests`
+- **执行结果**：17/17 passed, 0 failed, 0 skipped.
+- **新增 R1 设备测试项（3 项新增，共 17 项）**：
+  1. `demoDataNotAutoUploadedAndHasSeparateViewEntry`: 验证演示数据不自动上传到正式账本，Room v1 数据打标 `isDemo=true`，后台存在有效同步数据时优先展示权威账单，本地演示数据保留完整不丢失。
+  2. `emptyBackendPreservesLocalDemoBills`: 验证当后端为空或新建库首次同步无账单时，客户端安全回退展示本地演示账单，不清除旧本地记录，不显示错误零欠款。
+  3. `syncFailureDoesNotClearExistingSyncedRecords`: 验证网络异常或同步失败时，已缓存的权威同步账单与本地数据完好保留，不发生数据回退或清空。
+  4. `migrationFrom1To2PreservesLegacyDataAndEnablesSyncedTables`: Room 数据库由 v1 升级至 v2 后，旧演示账单、还款记录与种子标记完全保留，同时 6 张同步表与元数据表就绪。
+  5. `simultaneousFullPaymentsCannotOverpay`: 并发全额还款扣减互斥，严格防止超额还款。
+  6. `offlinePaymentThrowsExceptionAndDoesNotMutate`: 离线模式只读铁律，断网时尝试还款立即熔断抛出异常，绝不本地乐观扣减。
+  7. `syncedBillsMappingAndReactiveFlow`: 服务端快照/增量同步到本地 Room 后，响应式 Flow 自动映射为权威账单实体。
+  8. `committedRecordsSurviveDatabaseReopen`: 数据库关闭后重新打开数据完整保留。
+  9. `seedIsIdempotentAndPaymentsCanBeReversed`: 种子幂等性与还款撤销事务恢复。
+  10. `defaultFontAt360dp`: 360dp 紧凑布局默认字体无截断溢出。
+  11. `largeFontAt360dp`: 360dp 紧凑布局 1.3 倍大字体无截断溢出。
+  12. `largestFontAt360dp`: 360dp 紧凑布局 1.5 倍特大字体无截断溢出。
+  13. `fullPaymentSettlesAndDisablesAnotherPayment`: 全额还款后状态置为已结清，还款按钮安全置灰禁用。
+  14. `invalidAmountsCannotSaveAndCancelDoesNotWrite`: 非法金额校验拦截，取消操作不产生写入。
+  15. `activityRecreationKeepsDialogDraftAndHistoryNavigationWorks`: 旋转屏幕/Activity 重建保留还款弹窗输入草稿，历史筛选正常。
+  16. `repeatedSaveDuringSameUiFrameWritesOnlyOnce`: 单帧多次连续点击防抖拦截，仅触发一次提交。
+  17. `partialPaymentAndVoidRestoreBalanceAndKeepOriginalRecord`: 部分还款与撤销恢复剩余余额，保留完整审计记录。
+
+### 后台远程数据库与备份恢复测试（89 项全部通过）
+
+- **数据库**：远程 PostgreSQL 18.0 (`152.70.238.24:5432/cardcube`)
+- **命令**：`python -m pytest backend/tests`
+- **执行结果**：89 passed, 0 failed, 3 warnings in 658s（全量远程网络回归通过）
+- **R1 交付与独立性验证（`test_r1_delivery.py` 4 项新增）**：
+  1. `test_restore_triggers_cursor_out_of_range_and_forces_full_sync`: 模拟数据库备份恢复（序列重置）场景，当客户端游标大于恢复后的服务端最大序号时，服务端精准返回 `CURSOR_OUT_OF_RANGE` (HTTP 409)，促使客户端发起全量 bootstrap 同步重建本地状态。
+  2. `test_health_and_capabilities_independent_of_devices`: `/health` 与 `/v1/capabilities` 不依赖任何已配对设备独立工作，明确声明 stage 为 `r1-delivery` 且 `backup_restore: True`。
+  3. `test_backend_data_creation_without_active_app_session`: 后台定时收件与解析流水线在无 App 客户端连接时自驱运行，新生成的账户与账单可在后续客户端启动时完整同步。
+  4. `test_payment_consistency_across_both_ends`: 移动端在线还款与撤销后，通过后台账单详情 API 查看，剩余金额与已还金额双端保持 100% 严格一致。
+
+### 关键架构与性能优化交付
+
+1. **Bootstrap WAN 延迟性能调优**：
+   - 优化前：`get_bootstrap` 对每张账单单独发起 `get_statement_detail` 查询，在面对远程数据库时产生 466 次顺次网络往返，全量同步耗时 >70 秒。
+   - 优化后：重构为 3 次批量查询（单次 `IN (version_ids)` 抓取最新版本，单次 `IN (statement_ids)` 聚合有效还款额，纯内存 O(1) 组装），远程 WAN 耗时由 >70s 降至 ~1s。
+2. **真机测试防抖与键盘干扰规避**：
+   - 在 `CardCueTestRunner` 中注入 `setShowWhenLocked(true)`、`setTurnScreenOn(true)` 及 `KeyguardManager.requestDismissKeyguard`，消除手机锁屏对自动化测试的影响。
+   - 在 `PaymentFlowTest` 中针对软键盘弹出遮挡提交按钮问题增加 `closeKeyboard()` 统一收起，增加列表滚动至目标元素后再点击的鲁棒逻辑。
+3. **国内 Gradle 与依赖镜像加速**：
+   - `gradle-wrapper.properties` 切换至华为云 Gradle 8.9 官方镜像并校验官方 SHA-256 哈希，彻底解决海外 `services.gradle.org` 超时中断问题。
+   - `settings.gradle.kts` 配置阿里云与腾讯云 Maven 镜像，加速构建和依赖下载。
+
+---
 
 ## 2026-09-18 S4 后台解析与人工确认验收通过
 

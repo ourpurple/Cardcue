@@ -38,7 +38,11 @@ fun HistoryScreen(bills: List<Bill>, filter: Int, modifier: Modifier, onFilter: 
                 )
             }
         }
-        LazyColumn(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        LazyColumn(
+            modifier = Modifier.testTag("history-bill-list"),
+            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             if (filtered.isEmpty()) item { Text("暂时没有这类账单", color = Muted, modifier = Modifier.padding(24.dp)) }
             items(filtered, key = { it.statement.id }) { bill ->
                 Card(onClick = { onOpen(bill.statement.id) }, modifier = Modifier.testTag("history-bill-${bill.statement.id}"), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {

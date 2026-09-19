@@ -26,13 +26,13 @@ async def client():
 async def test_health(client: AsyncClient):
     r = await client.get("/health")
     assert r.status_code == 200
-    assert r.json()["version"] == "0.4.0"
+    assert r.json()["version"] == "0.5.0"
 
 
 async def test_capabilities_s1(client: AsyncClient):
     r = await client.get("/v1/capabilities")
     d = r.json()
-    assert d["stage"] in ("s3-email-sync", "s4-parsing-drafts")
+    assert d["stage"] in ("s3-email-sync", "s4-parsing-drafts", "r1-delivery")
     assert d["accounts"] is True
     assert d["email_sync"] is True
 
@@ -245,3 +245,4 @@ async def test_device_revoke(client: AsyncClient):
     assert r.status_code == 200
     assert r.json()["status"] == "revoked"
     assert r.json()["revoked_at"] is not None
+

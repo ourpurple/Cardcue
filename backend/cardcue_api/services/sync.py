@@ -3,12 +3,12 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cardcue_api.persistence.changelog import ChangeLog
 from cardcue_api.persistence.models import (
-    Account, Card, Statement, Payment,
+    Account, Card, Statement, Payment, StatementVersion,
 )
 from cardcue_api.domain.schemas import (
     AccountOut, CardOut, StatementDetail, StatementVersionOut, PaymentOut,
@@ -42,14 +42,34 @@ class SyncService:
         card_res = await session.execute(select(Card).order_by(Card.created_at))
         cards = [CardOut.model_validate(c) for c in card_res.scalars().all()]
 
-        # Statements with details
+        # Statements with details (batch-loaded to avoid N+1 queries)
         stmt_res = await session.execute(select(Statement).order_by(Statement.due_date.desc()))
         stmts = list(stmt_res.scalars().all())
 
+        ver_ids = [s.current_version_id for s in stmts if s.current_version_id]
+        ver_map = {}
+        if ver_ids:
+            ver_res = await session.execute(
+                select(StatementVersion).where(StatementVersion.id.in_(ver_ids))
+            )
+            ver_map = {v.id: v for v in ver_res.scalars().all()}
+
+        stmt_ids = [s.id for s in stmts]
+        paid_map = {}
+        if stmt_ids:
+            paid_res = await session.execute(
+                select(Payment.statement_id, func.coalesce(func.sum(Payment.amount_minor), 0))
+                .where(and_(Payment.statement_id.in_(stmt_ids), Payment.revoked_at.is_(None)))
+                .group_by(Payment.statement_id)
+            )
+            paid_map = {row[0]: int(row[1]) for row in paid_res.all()}
+
         statement_details: list[StatementDetail] = []
         for stmt in stmts:
-            detail = await self.billing_service.get_statement_detail(session, stmt.id)
-            ver = detail["current_version"]
+            ver = ver_map.get(stmt.current_version_id)
+            total_paid = paid_map.get(stmt.id, 0)
+            amount = ver.amount_minor if ver else 0
+            remaining = max(0, amount - total_paid)
             statement_details.append(
                 StatementDetail(
                     id=stmt.id,
@@ -61,8 +81,8 @@ class SyncService:
                     created_at=stmt.created_at,
                     updated_at=stmt.updated_at,
                     current_version=StatementVersionOut.model_validate(ver) if ver else None,
-                    total_paid_minor=detail["total_paid_minor"],
-                    remaining_minor=detail["remaining_minor"],
+                    total_paid_minor=total_paid,
+                    remaining_minor=remaining,
                 )
             )
 

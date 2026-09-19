@@ -89,11 +89,26 @@ class BillRepository(
         }
     }
 
+    /**
+     * R1-03: Dual-track bill display logic.
+     *
+     * When a sync cursor exists AND synced bills are present, show only synced bills
+     * (official mode). When the sync cursor exists but synced bills are empty (first
+     * empty backend or sync just completed with no data), fall back to demo bills so
+     * old local records are never silently erased. When no cursor exists at all, prefer
+     * synced bills if any, otherwise demo bills.
+     */
     val bills: Flow<List<Bill>> = combine(syncedBillsFlow, demoBillsFlow, dao.observeSyncMeta()) { syncedBills, demoBills, meta ->
         val hasSynced = meta.any { it.key == "sync_cursor" }
-        if (hasSynced) {
+        if (hasSynced && syncedBills.isNotEmpty()) {
+            // Official mode: backend-confirmed bills only.
             syncedBills
+        } else if (hasSynced && syncedBills.isEmpty()) {
+            // R1-03: sync cursor exists but backend returned no data.
+            // Preserve old local records instead of showing nothing.
+            demoBills
         } else {
+            // Never synced: show synced if present, else demo.
             if (syncedBills.isNotEmpty()) syncedBills else demoBills
         }
     }
