@@ -2,10 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system utilities and PostgreSQL client libraries
+# Install system utilities, PostgreSQL client libraries, and build tools
+# needed for compiling native wheels on aarch64 if pre-built wheels are unavailable.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libpq5 \
+    libpq-dev \
+    gcc \
+    libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy packaging configuration and install package

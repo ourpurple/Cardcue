@@ -3,7 +3,7 @@
 import os
 from datetime import date
 from typing import BinaryIO
-import fitz
+import pymupdf as fitz
 
 from cardcue_api.contracts import Evidence, StatementDraft
 from cardcue_api.parsing.evidence import MAX_PDF_PAGES, sanitize_text
