@@ -11,6 +11,7 @@ services:
       - ./backend/.env
     volumes:
       - cardcue-mail-storage:/app/data/mail_storage
+      - ./scripts:/app/scripts:ro
     ports:
       - "8000:8000"
     extra_hosts:
@@ -32,6 +33,7 @@ services:
       - ./backend/.env
     volumes:
       - cardcue-mail-storage:/app/data/mail_storage
+      - ./scripts:/app/scripts:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

@@ -7,6 +7,13 @@ import sys
 import urllib.error
 import urllib.request
 
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 DEFAULT_SERVER = "http://127.0.0.1:8000"
 
 SAMPLE_ACCOUNTS = [
@@ -70,9 +77,9 @@ def main():
     print(f"正在检查服务状态: {server}/health ...")
     try:
         health = request(f"{server}/health")
-        print(f"✓ 服务健康: {health}")
+        print(f"[OK] 服务健康: {health}")
     except Exception as e:
-        print(f"✗ 无法连接到服务: {e}")
+        print(f"[FAIL] 无法连接到服务: {e}")
         sys.exit(1)
 
     print("\n正在获取当前账户列表...")
@@ -98,13 +105,13 @@ def main():
         try:
             created_acct = request(f"{server}/v1/accounts", method="POST", data=acct_payload)
             acct_id = created_acct["id"]
-            print(f"✓ 创建账户成功: {item['bank']} (ID: {acct_id})")
+            print(f"[OK] 创建账户成功: {item['bank']} (ID: {acct_id})")
 
             for card in item["cards"]:
                 created_card = request(f"{server}/v1/accounts/{acct_id}/cards", method="POST", data=card)
-                print(f"  └─ 绑定卡片: 尾号 {card['card_tail']} (ID: {created_card['id']})")
+                print(f"  |-- 绑定卡片: 尾号 {card['card_tail']} (ID: {created_card['id']})")
         except Exception as e:
-            print(f"✗ 创建账户/卡片失败 ({item['bank']}): {e}")
+            print(f"[FAIL] 创建账户/卡片失败 ({item['bank']}): {e}")
 
     print("\n初始化完成！App 启动或点击同步时将自动下载以上账户与卡片。")
 
