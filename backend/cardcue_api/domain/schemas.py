@@ -23,6 +23,7 @@ class AccountUpdate(BaseModel):
 
 
 class AccountOut(BaseModel):
+    revision: int = 1
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     bank: str
@@ -39,10 +40,11 @@ class CardCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     account_id: uuid.UUID
     display_name: str | None = Field(default=None, max_length=100)
-    tail: str = Field(min_length=1, max_length=10)
+    tail: str = Field(pattern=r"^[0-9]{4}$")
 
 
 class CardOut(BaseModel):
+    revision: int = 1
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     account_id: uuid.UUID
@@ -60,8 +62,8 @@ class StatementCreate(BaseModel):
     currency: Literal["CNY", "USD"]
     statement_date: date
     due_date: date
-    amount_minor: int = Field(ge=0, le=999_999_999_999)
-    minimum_minor: int | None = Field(default=None, ge=0, le=999_999_999_999)
+    amount_minor: int = Field(ge=0, le=999_999_999_999, strict=True)
+    minimum_minor: int | None = Field(default=None, ge=0, le=999_999_999_999, strict=True)
     source: str = Field(default="manual", max_length=50)
 
 
@@ -102,7 +104,7 @@ class StatementDetail(StatementOut):
 class PaymentCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     statement_id: uuid.UUID
-    amount_minor: int = Field(gt=0, le=999_999_999_999)
+    amount_minor: int = Field(gt=0, le=999_999_999_999, strict=True)
     currency: Literal["CNY", "USD"]
     note: str | None = Field(default=None, max_length=200)
     request_id: uuid.UUID = Field(default_factory=uuid.uuid4, description="Client-generated idempotency key")
@@ -264,6 +266,7 @@ class MailSyncTriggerResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class StatementDraftOut(BaseModel):
+    revision: int = 1
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     email_source_id: uuid.UUID | None
@@ -289,17 +292,21 @@ class StatementDraftOut(BaseModel):
 
 
 class StatementDraftConfirmRequest(BaseModel):
+    request_id: uuid.UUID | None = None
+    expected_revision: int | None = Field(default=None, ge=1)
+    expected_statement_version_id: uuid.UUID | None = None
     model_config = ConfigDict(extra="forbid")
     account_id: uuid.UUID
     card_id: uuid.UUID | None = None
     currency: str | None = None
-    amount_minor: int | None = Field(default=None, ge=0)
-    minimum_minor: int | None = Field(default=None, ge=0)
+    amount_minor: int | None = Field(default=None, ge=0, le=999_999_999_999, strict=True)
+    minimum_minor: int | None = Field(default=None, ge=0, le=999_999_999_999, strict=True)
     statement_date: date | None = None
     due_date: date | None = None
 
 
 class StatementDraftRejectRequest(BaseModel):
+    expected_revision: int | None = Field(default=None, ge=1)
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(min_length=1, max_length=255)
 

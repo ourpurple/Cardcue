@@ -99,7 +99,7 @@ fun CardCueApp(model: CardCueViewModel) {
                     onReviewDraft = { reviewingDraftId = it.id }
                 )
                 tab == 1 -> HistoryScreen(state.bills, historyFilter, pageModifier, onFilter = { historyFilter = it }, onOpen = { selectedId = it })
-                else -> SettingsScreen(pageModifier)
+                else -> SettingsScreen(pageModifier, onResetAllData = { model.resetAllData() })
             }
         }
         state.bills.find { it.statement.id == paymentId }?.let { bill ->

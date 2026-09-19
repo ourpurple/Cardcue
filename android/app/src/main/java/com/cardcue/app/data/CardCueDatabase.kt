@@ -169,6 +169,20 @@ interface CardCueDao {
         clearSyncedCards()
         clearSyncedAccounts()
     }
+
+    @Query("DELETE FROM payments") suspend fun clearPayments()
+    @Query("DELETE FROM statements") suspend fun clearStatements()
+    @Query("DELETE FROM app_meta") suspend fun clearAppMeta()
+    @Query("DELETE FROM sync_meta") suspend fun clearSyncMeta()
+
+    @Transaction
+    suspend fun resetAllLocalData() {
+        clearPayments()
+        clearStatements()
+        clearAppMeta()
+        clearSyncMeta()
+        clearAllSyncedData()
+    }
 }
 
 @Database(

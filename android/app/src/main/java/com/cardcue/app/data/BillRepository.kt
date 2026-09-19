@@ -10,7 +10,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.util.UUID
 
-data class Bill(val statement: Statement, val payments: List<Payment>) {
+data class Bill(val statement: Statement, val payments: List<Payment>, val cardHolder: String? = null) {
     val activePayments: List<Payment> get() = payments.filter { it.voidedAt == null }
     val remaining: Long get() = BillingRules.remaining(statement.amountMinor, activePayments.map { it.amountMinor })
     val settled: Boolean get() = remaining == 0L
@@ -85,7 +85,8 @@ class BillRepository(
                 )
             }
 
-            Bill(statement, mappedPayments)
+            val holder = Regex("""\((.*?)\)""").find(account?.alias ?: account?.bank ?: "")?.groupValues?.get(1)
+            Bill(statement, mappedPayments, holder)
         }
     }
 
@@ -115,6 +116,8 @@ class BillRepository(
 
     val syncedAccounts: Flow<List<SyncedAccount>> = dao.observeSyncedAccounts()
     val syncedCards: Flow<List<SyncedCard>> = dao.observeSyncedCards()
+
+    suspend fun resetAllLocalData() = dao.resetAllLocalData()
 
     suspend fun seedIfNeeded(today: LocalDate = LocalDate.now()) = db.withTransaction {
         if (dao.meta("demo_seed_v1") != null) return@withTransaction

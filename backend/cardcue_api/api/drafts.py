@@ -102,32 +102,10 @@ async def reject_draft(
 ):
     """Reject a statement draft with reason."""
     try:
-        return await svc.reject_draft(session, draft_id, reason=data.reason)
+        return await svc.reject_draft(session, draft_id, reason=data.reason, expected_revision=data.expected_revision)
     except NotFoundError as e:
         _not_found(e)
     except ConflictError as e:
         _conflict(e)
 
 
-@router.post("/parse-source/{source_id}", response_model=StatementDraftOut)
-async def parse_email_source(
-    source_id: uuid.UUID,
-    session: AsyncSession = Depends(get_session),
-):
-    """Parse an email source into a draft."""
-    try:
-        return await svc.parse_email_source(session, source_id)
-    except NotFoundError as e:
-        _not_found(e)
-    except ConflictError as e:
-        _conflict(e)
-
-
-@router.post("/parse-all-pending", response_model=list[StatementDraftOut])
-async def parse_all_pending(
-    limit: int = Query(default=50, ge=1, le=100),
-    reparse: bool = Query(default=False, description="Whether to reparse already processed email candidates"),
-    session: AsyncSession = Depends(get_session),
-):
-    """Trigger parsing of all pending statement candidate email sources."""
-    return await svc.parse_all_pending(session, limit=limit, reparse=reparse)

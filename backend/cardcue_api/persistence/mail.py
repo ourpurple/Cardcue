@@ -39,6 +39,13 @@ class Mailbox(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    settings_json: Mapped[dict] = mapped_column(__import__("sqlalchemy").JSON, nullable=False, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    tested_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pending_config: Mapped[dict | None] = mapped_column(__import__("sqlalchemy").JSON, nullable=True)
+    pending_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     cursors: Mapped[list["MailCursor"]] = relationship(back_populates="mailbox", cascade="all, delete-orphan")
     jobs: Mapped[list["MailJob"]] = relationship(back_populates="mailbox", cascade="all, delete-orphan")
     email_sources: Mapped[list["EmailSource"]] = relationship(back_populates="mailbox", cascade="all, delete-orphan")

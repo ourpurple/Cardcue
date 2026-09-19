@@ -22,6 +22,7 @@ from cardcue_api.persistence.models import Base
 
 class StatementDraftModel(Base):
     __tablename__ = "statement_drafts"
+    revision: Mapped[int] = mapped_column(__import__("sqlalchemy").Integer, nullable=False, default=1)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email_source_id: Mapped[uuid.UUID | None] = mapped_column(

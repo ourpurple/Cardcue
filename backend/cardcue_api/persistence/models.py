@@ -9,6 +9,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
+    Integer,
     Boolean,
     CheckConstraint,
     Date,
@@ -34,6 +35,7 @@ class Base(DeclarativeBase):
 
 class Account(Base):
     __tablename__ = "accounts"
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     bank: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -53,6 +55,7 @@ class Account(Base):
 
 class Card(Base):
     __tablename__ = "cards"
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("accounts.id"), nullable=False)

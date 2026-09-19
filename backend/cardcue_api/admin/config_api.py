@@ -1,0 +1,205 @@
+import asyncio
+import uuid
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from cardcue_api.admin.models import ModelProfile, ModelRevision, RuntimeSettings
+from cardcue_api.admin.schemas import MailConfig, ModelConfig, ModelTest, RevisionRequest
+from cardcue_api.admin.security import audit, now, recent_admin, require_admin
+from cardcue_api.mail.client import ReadOnlyImapClient
+from cardcue_api.mail.crypto import decrypt_token, encrypt_token
+from cardcue_api.persistence.database import get_session
+from cardcue_api.persistence.mail import Mailbox
+
+router = APIRouter(prefix="/v1/admin", tags=["configuration"], dependencies=[Depends(require_admin)])
+
+async def get_locked(session, cls, identifier):
+    value = (await session.execute(select(cls).where(cls.id == identifier).with_for_update())).scalar_one_or_none()
+    if not value:
+        raise HTTPException(404, "记录不存在")
+    return value
+
+def revision_check(row, expected):
+    if row.revision != expected:
+        raise HTTPException(409, "内容已被其他操作更新，请刷新后重试")
+
+def mailbox_public(row):
+    config = dict(row.settings_json or {})
+    config.update(email_address=row.email_address, imap_host=row.imap_host, imap_port=row.imap_port,
+                  use_ssl=row.use_ssl, check_interval_minutes=row.check_interval_minutes)
+    if row.pending_config:
+        config.update(row.pending_config)
+    config.update(id=str(row.id), revision=row.revision, tested_revision=row.tested_revision,
+                  is_active=row.is_active, status=row.status, last_checked_at=row.last_checked_at,
+                  last_attempt_at=row.last_attempt_at, error_message=row.error_message,
+                  has_secret=bool(row.pending_token or row.encrypted_auth_token), has_pending=bool(row.pending_config))
+    return config
+
+@router.get("/mailboxes")
+async def list_mailboxes(session=Depends(get_session)):
+    rows = (await session.execute(select(Mailbox).order_by(Mailbox.created_at.desc()))).scalars()
+    return [mailbox_public(row) for row in rows]
+
+@router.post("/mailboxes", status_code=201)
+async def create_mailbox(data: MailConfig, actor=Depends(recent_admin), session=Depends(get_session)):
+    if not data.auth_token:
+        raise HTTPException(422, "首次配置必须填写授权码")
+    if (await session.execute(select(Mailbox.id).where(Mailbox.email_address == data.email_address))).first():
+        raise HTTPException(409, "邮箱已存在；请编辑或恢复原配置")
+    config = data.model_dump(exclude={"auth_token", "expected_revision"})
+    row = Mailbox(email_address=data.email_address, imap_host=data.imap_host, imap_port=data.imap_port,
+                  use_ssl=data.use_ssl, encrypted_auth_token=encrypt_token(data.auth_token), auth_type="password",
+                  is_active=False, status="disabled", check_interval_minutes=data.check_interval_minutes,
+                  settings_json=config, revision=1)
+    session.add(row)
+    await session.flush()
+    await audit(session, actor, "mailbox_created_disabled", row.id)
+    return mailbox_public(row)
+
+@router.put("/mailboxes/{identifier}")
+async def update_mailbox(identifier: uuid.UUID, data: MailConfig, actor=Depends(recent_admin), session=Depends(get_session)):
+    row = await get_locked(session, Mailbox, identifier)
+    revision_check(row, data.expected_revision)
+    # Changing mailbox identity must be a separate mailbox, never silently reuse old UID cursors.
+    old = row.settings_json or {}
+    if data.email_address != row.email_address or data.imap_host != row.imap_host or data.folder != old.get("folder", "INBOX") or data.username != old.get("username", ""):
+        raise HTTPException(409, "邮箱身份、服务器或文件夹变化请新建配置；旧邮箱可停用，历史保留")
+    row.pending_config = data.model_dump(exclude={"auth_token", "expected_revision"})
+    if data.auth_token:
+        row.pending_token = encrypt_token(data.auth_token)
+    row.revision += 1
+    row.tested_revision = None
+    await audit(session, actor, "mailbox_configuration_staged", row.id, {"revision": row.revision, "secret_changed": bool(data.auth_token)})
+    return mailbox_public(row)
+
+@router.post("/mailboxes/{identifier}/test")
+async def test_mailbox(identifier: uuid.UUID, data: RevisionRequest, actor=Depends(recent_admin), session=Depends(get_session)):
+    row = await get_locked(session, Mailbox, identifier)
+    revision_check(row, data.expected_revision)
+    conf = mailbox_public(row)
+    token = decrypt_token(row.pending_token or row.encrypted_auth_token)
+    def test():
+        with ReadOnlyImapClient(host=conf["imap_host"], port=conf["imap_port"],
+                               username=conf.get("username") or conf["email_address"], password=token,
+                               use_ssl=conf["use_ssl"], timeout=20) as client:
+            client.select_folder(conf.get("folder", "INBOX"))
+    try:
+        await asyncio.to_thread(test)
+    except Exception:
+        row.tested_revision = None
+        await audit(session, actor, "mailbox_test_failed", row.id)
+        await session.commit()
+        raise HTTPException(400, "连接测试失败，请检查地址、TLS 和授权码；未修改原生效配置")
+    row.tested_revision = row.revision
+    await audit(session, actor, "mailbox_test_succeeded", row.id)
+    return {"ok": True, "revision": row.revision}
+
+@router.post("/mailboxes/{identifier}/enable")
+async def enable_mailbox(identifier: uuid.UUID, data: RevisionRequest, actor=Depends(recent_admin), session=Depends(get_session)):
+    row = await get_locked(session, Mailbox, identifier)
+    revision_check(row, data.expected_revision)
+    if row.tested_revision != row.revision:
+        raise HTTPException(409, "请先测试当前版本的连接")
+    conf = row.pending_config or row.settings_json
+    for field in ("imap_host", "imap_port", "use_ssl", "check_interval_minutes"):
+        if field in conf:
+            setattr(row, field, conf[field])
+    if row.pending_token:
+        row.encrypted_auth_token = row.pending_token
+    row.settings_json = {**conf, "active_revision": row.revision}
+    row.pending_config, row.pending_token = None, None
+    row.is_active, row.status, row.error_message = True, "active", None
+    await audit(session, actor, "mailbox_enabled", row.id, {"revision": row.revision})
+    return mailbox_public(row)
+
+@router.post("/mailboxes/{identifier}/disable")
+async def disable_mailbox(identifier: uuid.UUID, data: RevisionRequest, actor=Depends(recent_admin), session=Depends(get_session)):
+    row = await get_locked(session, Mailbox, identifier)
+    revision_check(row, data.expected_revision)
+    row.is_active, row.status = False, "disabled"
+    await audit(session, actor, "mailbox_disabled", row.id)
+    return mailbox_public(row)
+
+async def model_public(session, profile):
+    revisions = list((await session.execute(select(ModelRevision).where(ModelRevision.profile_id == profile.id).order_by(ModelRevision.number.desc()))).scalars())
+    state = await session.get(RuntimeSettings, "model")
+    active = (state.value or {}).get("revision_id") if state else None
+    return {"id": profile.id, "name": profile.name, "revisions": [
+        {"id": row.id, "number": row.number, "parameters": row.parameters, "has_secret": bool(row.encrypted_key),
+         "tested_at": row.tested_at, "test_error": row.test_error, "revoked": row.revoked,
+         "active": str(row.id) == active, "created_at": row.created_at} for row in revisions]}
+
+@router.get("/models")
+async def models(session=Depends(get_session)):
+    rows = (await session.execute(select(ModelProfile).order_by(ModelProfile.created_at.desc()))).scalars()
+    return [await model_public(session, row) for row in rows]
+
+async def save_model(session, data, actor, identifier=None):
+    if identifier:
+        profile = await get_locked(session, ModelProfile, identifier)
+        latest = (await session.execute(select(ModelRevision).where(ModelRevision.profile_id == identifier).order_by(ModelRevision.number.desc()).limit(1))).scalar_one()
+        if data.expected_revision != latest.number:
+            raise HTTPException(409, "配置已更新，请刷新")
+        key, number = latest.encrypted_key, latest.number + 1
+        profile.name = data.name
+    else:
+        profile = ModelProfile(name=data.name)
+        session.add(profile)
+        await session.flush()
+        key, number = "", 1
+    if data.api_key:
+        key = encrypt_token(data.api_key)
+    if not key:
+        raise HTTPException(422, "请填写模型 API Key")
+    revision = ModelRevision(profile_id=profile.id, number=number,
+        parameters=data.model_dump(exclude={"name", "api_key", "expected_revision"}), encrypted_key=key)
+    session.add(revision)
+    await session.flush()
+    await audit(session, actor, "model_revision_saved", profile.id, {"revision": number})
+    return await model_public(session, profile)
+
+@router.post("/models", status_code=201)
+async def create_model(data: ModelConfig, actor=Depends(recent_admin), session=Depends(get_session)):
+    return await save_model(session, data, actor)
+
+@router.put("/models/{identifier}")
+async def update_model(identifier: uuid.UUID, data: ModelConfig, actor=Depends(recent_admin), session=Depends(get_session)):
+    return await save_model(session, data, actor, identifier)
+
+@router.post("/model-revisions/{identifier}/test")
+async def test_model(identifier: uuid.UUID, data: ModelTest, actor=Depends(recent_admin), session=Depends(get_session)):
+    from cardcue_api.admin.model_runtime import ManagedExtractor
+    row = await get_locked(session, ModelRevision, identifier)
+    if row.revoked:
+        raise HTTPException(409, "配置已撤销")
+    await session.commit()
+    extractor = ManagedExtractor(row, force=True)
+    try:
+        result, _ = await extractor.extract("测试银行信用卡账单：币种人民币 CNY，账单金额 100.00 元，最低还款 10.00 元，账单日 2026-01-01，到期日 2026-01-20。" if data.sample else "This is a connection test, not a bill. Return all financial fields as null.")
+    except Exception:
+        row.test_error = "connection_or_schema_failed"
+        row.tested_at = None
+        await session.commit()
+        raise HTTPException(400, "模型测试失败：检查地址、密钥、模型名称及 JSON 支持情况")
+    row.tested_at, row.test_error = now(), None
+    await audit(session, actor, "model_test_succeeded", row.id)
+    return {"ok": True, "sample": result.model_dump(mode="json"), "usage": extractor.usage}
+
+@router.post("/model-revisions/{identifier}/activate")
+async def activate_model(identifier: uuid.UUID, actor=Depends(recent_admin), session=Depends(get_session)):
+    state = (await session.execute(select(RuntimeSettings).where(RuntimeSettings.key == "model").with_for_update())).scalar_one()
+    row = await get_locked(session, ModelRevision, identifier)
+    if row.revoked or not row.tested_at:
+        raise HTTPException(409, "请先成功测试未撤销的配置版本")
+    state.value = {"revision_id": str(identifier)}
+    await audit(session, actor, "model_activated", identifier)
+    return {"ok": True}
+
+@router.post("/model-revisions/{identifier}/revoke")
+async def revoke_model(identifier: uuid.UUID, actor=Depends(recent_admin), session=Depends(get_session)):
+    state = (await session.execute(select(RuntimeSettings).where(RuntimeSettings.key == "model").with_for_update())).scalar_one()
+    row = await get_locked(session, ModelRevision, identifier)
+    row.revoked = True
+    if state.value.get("revision_id") == str(identifier):
+        state.value = {}
+    await audit(session, actor, "model_revoked", identifier)
+    return {"ok": True}

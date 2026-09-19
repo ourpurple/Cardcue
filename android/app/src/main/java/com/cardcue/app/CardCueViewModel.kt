@@ -89,13 +89,13 @@ class CardCueViewModel(private val repository: BillRepository) : ViewModel() {
                 try {
                     val res = sync.triggerMailSync()
                     val count = res.jobIds.size
-                    val msg = if (count > 0) "已触发后台检查邮件 (共  个任务)" else res.message.ifBlank { "已检查邮件" }
+                    val msg = if (count > 0) "已触发后台检查邮件 (共 ${count} 个任务)" else res.message.ifBlank { "已检查邮件" }
                     eventChannel.send(msg)
                     delay(1500)
                     parsePendingEmails()
                 } catch (e: Exception) {
                     val errMsg = e.message ?: "网络异常"
-                    eventChannel.send("检查邮件失败: ")
+                    eventChannel.send("检查邮件失败: $errMsg")
                 }
             } else {
                 eventChannel.send("本地演示模式，未配置同步服务器")
@@ -142,14 +142,35 @@ class CardCueViewModel(private val repository: BillRepository) : ViewModel() {
                     val drafts = sync.parseAllPendingDrafts()
                     _pendingDrafts.value = sync.fetchPendingDrafts()
                     val count = drafts.size
-                    val msg = if (count > 0) "已解析  封账单邮件" else "暂无新的待解析邮件"
+                    val msg = if (count > 0) "已解析 ${count} 封账单邮件" else "暂无新的待解析邮件"
                     eventChannel.send(msg)
                 } catch (e: Exception) {
                     val errMsg = e.message ?: "网络异常"
-                    eventChannel.send("解析失败: ")
+                    eventChannel.send("解析失败: $errMsg")
                 }
             } else {
                 eventChannel.send("本地演示模式，未配置同步服务器")
+            }
+        }
+    }
+
+    fun resetAllData(onComplete: () -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                mutableState.value = mutableState.value.copy(busy = true)
+                repository.resetAllLocalData()
+                _pendingDrafts.value = emptyList()
+                val sync = repository.syncManager
+                if (sync != null) {
+                    sync.syncNow()
+                    loadPendingDrafts()
+                }
+                eventChannel.send("已重置本地数据并重新拉取")
+                onComplete()
+            } catch (e: Exception) {
+                eventChannel.send("重置数据失败: ${e.message ?: "未知错误"}")
+            } finally {
+                mutableState.value = mutableState.value.copy(busy = false)
             }
         }
     }

@@ -115,7 +115,7 @@ fun DraftReviewDialog(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = " 账单草稿",
+                            text = "${draft.bank} 账单草稿",
                             color = Color.White,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
@@ -170,7 +170,7 @@ fun DraftReviewDialog(
                                     Text("核对提醒", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Red)
                                     draft.reviewReasons.forEach { reason ->
                                         Text(
-                                            "• ",
+                                            "• ${formatReviewReason(reason)}",
                                             fontSize = 11.sp,
                                             color = Ink,
                                             lineHeight = 16.sp,
@@ -201,7 +201,7 @@ fun DraftReviewDialog(
                                     Column(Modifier.weight(1f)) {
                                         if (selectedAccount != null) {
                                             Text(
-                                                " ()",
+                                                "${selectedAccount.bank} (${selectedAccount.alias})",
                                                 fontSize = 14.sp,
                                                 fontWeight = FontWeight.Medium
                                             )
@@ -225,7 +225,7 @@ fun DraftReviewDialog(
                                 accounts.forEach { acct ->
                                     DropdownMenuItem(
                                         text = {
-                                            Text(" ()")
+                                            Text("${acct.bank} (${acct.alias})")
                                         },
                                         onClick = {
                                             selectedAccountId = acct.id
@@ -240,7 +240,7 @@ fun DraftReviewDialog(
                     // Card tail display if available
                     if (draft.cardTails.isNotEmpty()) {
                         Text(
-                            "识别到卡号尾号: ",
+                            "识别到卡号尾号: ${draft.cardTails.joinToString(" · ")}",
                             fontSize = 12.sp,
                             color = Green,
                             fontWeight = FontWeight.Medium
@@ -419,7 +419,7 @@ private fun EvidenceCard(snippet: EvidenceSnippetDto) {
                     color = Ink
                 )
                 Text(
-                    " · 置信度 %",
+                    "${snippet.sourceType} · 置信度 ${(snippet.confidence * 100).toInt()}%",
                     fontSize = 10.sp,
                     color = Muted
                 )
@@ -452,13 +452,13 @@ private fun formatEvidenceField(field: String): String = when (field) {
     "currency" -> "币种依据"
     "card_tails" -> "卡片尾号依据"
     "account_reference" -> "账户编号依据"
-    else -> "字段依据 ()"
+    else -> "字段依据 ($field)"
 }
 
 private fun formatReviewReason(reason: String): String = when {
     reason == "unresolved:account" -> "未匹配到唯一的信用卡账户，请手动核对并选择归属账户"
     reason == "unverified:minimum_minor" -> "最低还款额有提取值，但缺少明确原文依据，请核实"
     reason == "mismatch:due_before_statement" -> "到期还款日早于账单日，请核对日期"
-    reason.startsWith("unresolved:") -> "未明确关联: "
+    reason.startsWith("unresolved:") -> "未明确关联: ${reason.removePrefix("unresolved:")}"
     else -> reason
 }

@@ -1,5 +1,6 @@
 package com.cardcue.app.feature.home
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -8,7 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -16,7 +17,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -85,9 +88,9 @@ fun HomeScreen(
                 Text("待还合计 · 人民币", color = Color(0xFFB7C1C4), fontSize = 12.sp, lineHeight = 16.sp)
                 Text(Money.display(totals["CNY"] ?: 0L, "CNY"), color = Color.White, fontSize = 30.sp, lineHeight = 38.sp, fontWeight = FontWeight.Medium, letterSpacing = (-0.5).sp, maxLines = 1, modifier = Modifier.fillMaxWidth().testTag("home-total-CNY"))
                 totals.filterKeys { it != "CNY" }.forEach { (currency, amount) ->
-                    Text("另有  · 单独统计", color = Gold, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
+                    Text("另有 ${Money.display(amount, currency)} · 单独统计", color = Gold, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
                 }
-                Text(" 笔近期到期 · 未来 7 天（含今天）", color = Color(0xFFB7C1C4), fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 8.dp))
+                Text("$soon 笔近期到期 · 未来 7 天（含今天）", color = Color(0xFFB7C1C4), fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 8.dp))
             }
         }
         if (pendingDrafts.isNotEmpty()) {
@@ -108,9 +111,9 @@ fun HomeScreen(
                         Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = Ink, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("待核对账单草稿 ()", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Ink)
+                            Text("待核对账单草稿 (${pendingDrafts.size})", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Ink)
                             Text(
-                                " · 点击查看原文依据并入账",
+                                "${pendingDrafts.first().bank} · 点击查看原文依据并入账",
                                 fontSize = 11.sp,
                                 color = Muted,
                                 maxLines = 1,
@@ -146,30 +149,265 @@ fun HomeScreen(
     }
 }
 
+fun shortBankName(bank: String): String = when {
+    bank.contains("农业") || bank.contains("农行") -> "农行"
+    bank.contains("中国银行") || bank.contains("中行") -> "中行"
+    bank.contains("中信") -> "中信"
+    bank.contains("工商") || bank.contains("工行") -> "工行"
+    bank.contains("建设") || bank.contains("建行") -> "建行"
+    bank.contains("交通") || bank.contains("交行") -> "交行"
+    bank.contains("招商") || bank.contains("招行") -> "招行"
+    bank.contains("广发") -> "广发"
+    bank.contains("浦发") || bank.contains("浦东发展") -> "浦发"
+    bank.contains("民生") -> "民生"
+    bank.contains("光大") -> "光大"
+    bank.contains("平安") -> "平安"
+    bank.contains("兴业") -> "兴业"
+    bank.contains("华夏") -> "华夏"
+    bank.contains("邮政") || bank.contains("邮储") -> "邮储"
+    bank.contains("北京") -> "北京"
+    bank.contains("上海") -> "上海"
+    bank.contains("江苏") -> "江苏"
+    bank.contains("浙商") -> "浙商"
+    bank.contains("宁波") -> "宁波"
+    bank.endsWith("银行") -> bank.removeSuffix("银行")
+    else -> bank
+}
+
 @Composable
 private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: () -> Unit) {
     val s = bill.statement
-    val urgent = !bill.settled && BillingRules.daysUntil(LocalDate.parse(s.dueDate), today) <= 3
-    Card(onClick = onOpen, modifier = Modifier.testTag("home-bill-${s.id}").fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                BankBadge(s.bankMark, Color(s.color), compact = true)
-                Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                    Text(s.bank, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, lineHeight = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("尾号  · ", color = Muted, fontSize = 11.sp, lineHeight = 16.sp, maxLines = 1, modifier = Modifier.fillMaxWidth().testTag("home-cards-${s.id}"))
+    val isNew = !s.isDemo && runCatching {
+        val stDate = LocalDate.parse(s.statementDate)
+        val diff = java.time.temporal.ChronoUnit.DAYS.between(stDate, today)
+        diff in 0..20
+    }.getOrDefault(false)
+
+    val dueDate = runCatching { LocalDate.parse(s.dueDate) }.getOrNull()
+    val daysUntil = if (dueDate != null) BillingRules.daysUntil(dueDate, today) else 999L
+    val isCoral = daysUntil in -999L..2L
+
+    Card(
+        onClick = onOpen,
+        modifier = Modifier
+            .testTag("home-bill-${s.id}")
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White)
+    ) {
+        Box(Modifier.fillMaxWidth()) {
+            if (isNew) {
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .align(Alignment.TopStart)
+                        .clip(RoundedCornerShape(topStart = 16.dp))
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val path = Path().apply {
+                            moveTo(0f, size.height * 0.72f)
+                            lineTo(size.width * 0.72f, 0f)
+                            lineTo(size.width, 0f)
+                            lineTo(0f, size.height)
+                            close()
+                        }
+                        drawPath(path, Color(0xFF00C800))
+                    }
+                    Text(
+                        text = "new",
+                        color = Color.White,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .offset(x = (-6).dp, y = (-6).dp)
+                            .rotate(-45f)
+                    )
                 }
-                Icon(Icons.Outlined.ChevronRight, contentDescription = "查看账单", tint = Muted, modifier = Modifier.size(20.dp))
             }
-            Spacer(Modifier.height(2.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(Money.display(bill.remaining, s.currency), fontSize = 23.sp, lineHeight = 30.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.5).sp, modifier = Modifier.weight(1f).testTag("home-remaining-${s.id}"))
-                Spacer(Modifier.width(8.dp))
-                if (!bill.settled) Button(onClick = onPay, modifier = Modifier.testTag("home-pay-${s.id}").defaultMinSize(minHeight = 48.dp), colors = ButtonDefaults.buttonColors(containerColor = Gold.copy(alpha = 0.28f), contentColor = Ink), contentPadding = PaddingValues(horizontal = 12.dp)) {
-                    Text("记录还款", fontSize = 12.sp)
-                } else Icon(Icons.Outlined.CheckCircle, contentDescription = "已记录还清", tint = Green)
+
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                // Top row: BankBadge + Bank Name + Cardholder + Tails + MoreHoriz icon
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    BankBadge(s.bankMark, Color(s.color), compact = true)
+                    Spacer(Modifier.width(8.dp))
+                    val titleText = buildString {
+                        append(shortBankName(s.bank))
+                        if (!bill.cardHolder.isNullOrBlank()) {
+                            append(" ").append(bill.cardHolder)
+                        }
+                        if (s.cardTails.isNotBlank()) {
+                            append(" ").append(s.cardTails)
+                        }
+                    }
+                    Text(
+                        text = titleText,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.sp,
+                        lineHeight = 20.sp,
+                        color = Ink,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("home-cards-${s.id}")
+                    )
+                    IconButton(
+                        onClick = onOpen,
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            Icons.Outlined.MoreHoriz,
+                            contentDescription = "更多",
+                            tint = Color(0xFFC7C7CC),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Middle row: 3 columns
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Col 1: Amount & "本期账单"
+                    Column(modifier = Modifier.weight(1.1f)) {
+                        val amountText = when {
+                            bill.remaining > 0L -> {
+                                if (s.currency == "CNY") {
+                                    String.format(java.util.Locale.US, "%.2f", bill.remaining / 100.0)
+                                } else {
+                                    Money.display(bill.remaining, s.currency)
+                                }
+                            }
+                            s.amountMinor == 0L -> "待更新"
+                            bill.settled -> "0.00"
+                            else -> "待更新"
+                        }
+                        Text(
+                            text = amountText,
+                            fontSize = 22.sp,
+                            lineHeight = 26.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = (-0.5).sp,
+                            color = if (amountText == "待更新") Color(0xFF8C8C8C) else Ink,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("home-remaining-${s.id}")
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "本期账单",
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
+                            color = Color(0xFF8C8C8C)
+                        )
+                    }
+
+                    // Col 2: Countdown & Due Date
+                    val countdownChar = when {
+                        daysUntil < 0L -> "${-daysUntil}"
+                        daysUntil == 0L -> "今"
+                        daysUntil == 1L -> "明"
+                        daysUntil == 2L -> "后"
+                        else -> "$daysUntil"
+                    }
+                    val countdownUnit = when {
+                        daysUntil < 0L -> "天逾期"
+                        daysUntil in 0L..2L -> "天到期"
+                        else -> "天后到期"
+                    }
+                    val dateText = if (dueDate != null) {
+                        String.format(java.util.Locale.US, "%02d-%02d", dueDate.monthValue, dueDate.dayOfMonth)
+                    } else {
+                        s.dueDate
+                    }
+
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = countdownChar,
+                            fontSize = 28.sp,
+                            lineHeight = 32.sp,
+                            fontWeight = FontWeight.Normal,
+                            color = if (isCoral) Color(0xFFE85D4E) else Color(0xFF262626)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Column {
+                            Text(
+                                text = countdownUnit,
+                                fontSize = 11.sp,
+                                lineHeight = 14.sp,
+                                color = if (isCoral) Color(0xFFE85D4E) else Color(0xFF595959)
+                            )
+                            Text(
+                                text = dateText,
+                                fontSize = 11.sp,
+                                lineHeight = 14.sp,
+                                color = Color(0xFF8C8C8C),
+                                maxLines = 1,
+                                modifier = Modifier.testTag("home-due-${s.id}")
+                            )
+                        }
+                    }
+
+                    // Col 3: Action Button (Pill)
+                    val pillBg: Color
+                    val pillText: String
+                    val pillTextColor: Color
+                    when {
+                        bill.remaining > 0L -> {
+                            pillBg = Color(0xFFEAA655)
+                            pillText = "还款"
+                            pillTextColor = Color.White
+                        }
+                        bill.settled -> {
+                            pillBg = Color(0xFFE8F5E9)
+                            pillText = "已还清"
+                            pillTextColor = Color(0xFF2E7D32)
+                        }
+                        else -> {
+                            pillBg = Color(0xFFEDF3FC)
+                            pillText = "更新账单"
+                            pillTextColor = Color(0xFF2E82E5)
+                        }
+                    }
+
+                    Button(
+                        onClick = { if (bill.remaining > 0L) onPay() else onOpen() },
+                        shape = RoundedCornerShape(50),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = pillBg,
+                            contentColor = pillTextColor
+                        ),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                        modifier = Modifier
+                            .testTag("home-pay-${s.id}")
+                            .defaultMinSize(minHeight = 48.dp, minWidth = 76.dp)
+                    ) {
+                        Text(
+                            text = pillText,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                if (s.cardTails.contains("·")) {
+                    Text(
+                        text = "多卡共用账单 · 金额仅统计一次",
+                        color = Green,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
             }
-            Text(" · 还款日 ", color = if (bill.settled) Green else if (urgent) Red else Muted, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, modifier = Modifier.fillMaxWidth().testTag("home-due-${s.id}"))
-            if (s.cardTails.contains("·")) Text("多卡共用账单 · 金额仅统计一次", color = Green, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
         }
     }
 }

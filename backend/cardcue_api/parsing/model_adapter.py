@@ -86,10 +86,12 @@ def parse_model_response(content: str, email_date: date | None = None) -> Statem
     def _to_minor(val: Any) -> int | None:
         if val is None:
             return None
+        if isinstance(val, bool):
+            raise ValueError("Boolean is not a monetary amount")
         if isinstance(val, int):
             return val
         if isinstance(val, float):
-            return int(round(val * 100))
+            raise ValueError("Model amounts must be integers in minor units, not floats")
         if isinstance(val, str):
             val_clean = val.strip().replace(",", "").replace("¥", "").replace("￥", "").replace("$", "")
             if not val_clean:
@@ -117,7 +119,7 @@ def parse_model_response(content: str, email_date: date | None = None) -> Statem
             try:
                 return date.fromisoformat(val_clean)
             except Exception:
-                return parse_date_string(val_clean, reference_year=ref_year)
+                return None
         return None
 
     stmt_date = _to_date(data.get("statement_date"))
@@ -295,7 +297,7 @@ class ModelStatementExtractor:
 
                     if resp.status_code != 200:
                         last_error = f"http_{resp.status_code}"
-                        logger.warning("LLM extraction failed (HTTP %s): %s", resp.status_code, resp.text[:200])
+                        logger.warning("LLM extraction failed (HTTP %s)", resp.status_code)
                         continue
 
                     data = resp.json()
@@ -305,13 +307,13 @@ class ModelStatementExtractor:
                     return draft, "model"
             except (ValidationError, json.JSONDecodeError, KeyError, ValueError) as e:
                 last_error = f"schema_validation_failed: {type(e).__name__}"
-                logger.warning("LLM response schema validation failed: %s", e)
+                logger.warning("LLM response schema validation failed")
             except httpx.RequestError as e:
                 last_error = f"network_error: {type(e).__name__}"
-                logger.warning("LLM request network error: %s", e)
+                logger.warning("LLM request network error")
             except Exception as e:
                 last_error = f"unexpected: {type(e).__name__}"
-                logger.warning("Unexpected error during LLM extraction: %s", e)
+                logger.warning("Unexpected error during LLM extraction")
 
         # If LLM attempts exhausted, fallback to rule extractor with audit reason
         draft = self.rule_extractor.extract(

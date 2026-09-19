@@ -28,7 +28,8 @@ fun BankBadge(mark: String, color: Color, compact: Boolean = false) {
             .background(color.copy(alpha = 0.1f)),
         contentAlignment = Alignment.Center
     ) {
-        Text(mark, color = color, fontWeight = FontWeight.Bold, fontSize = if (compact) 16.sp else 18.sp)
+        val fontSize = if (compact) (if (mark.length > 1) 11.sp else 15.sp) else 18.sp
+        Text(mark, color = color, fontWeight = FontWeight.Bold, fontSize = fontSize)
     }
 }
 

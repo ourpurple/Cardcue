@@ -80,6 +80,7 @@ class BillingService:
 
     async def update_account(self, session: AsyncSession, account_id: uuid.UUID, data: AccountUpdate) -> Account:
         acct = await self.get_account(session, account_id)
+        acct.revision += 1
         if data.alias is not None:
             acct.alias = data.alias
         if data.status is not None:
@@ -206,6 +207,8 @@ class BillingService:
         )
         found = existing.scalar_one_or_none()
         if found:
+            if (found.statement_id, found.amount_minor, found.currency, found.note) != (data.statement_id, data.amount_minor, data.currency, data.note):
+                raise ConflictError("Request id was already used with different content")
             return found, False
 
         # Lock statement row to serialize concurrent payments
@@ -215,6 +218,13 @@ class BillingService:
         stmt = result.scalar_one_or_none()
         if not stmt:
             raise NotFoundError(f"Statement {data.statement_id} not found")
+
+        # Re-check idempotency after acquiring the financial lock.
+        found = await session.get(Payment, rid, populate_existing=True)
+        if found:
+            if (found.statement_id, found.amount_minor, found.currency, found.note) != (data.statement_id, data.amount_minor, data.currency, data.note):
+                raise ConflictError("Request id was already used with different content")
+            return found, False
 
         if data.currency != stmt.currency:
             raise ConflictError(f"Payment currency {data.currency} does not match statement currency {stmt.currency}")
@@ -261,8 +271,10 @@ class BillingService:
         payment = await session.get(Payment, payment_id)
         if not payment:
             raise NotFoundError(f"Payment {payment_id} not found")
+        await session.execute(select(Statement).where(Statement.id == payment.statement_id).with_for_update())
+        await session.refresh(payment)
         if payment.revoked_at is not None:
-            raise ConflictError("Payment already revoked")
+            return payment
 
         payment.revoked_at = datetime.now(timezone.utc)
         payment.revoke_reason = reason

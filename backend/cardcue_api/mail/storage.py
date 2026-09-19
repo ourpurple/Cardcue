@@ -28,7 +28,7 @@ class MailStorageManager:
 
     def _verify_safe_path(self, path: Path) -> Path:
         resolved = path.resolve()
-        if not str(resolved).startswith(str(self.base_dir)):
+        if not resolved.is_relative_to(self.base_dir):
             raise MailStorageError(f"Path traversal detected: {path} is outside storage root {self.base_dir}")
         return resolved
 
@@ -55,7 +55,7 @@ class MailStorageManager:
     ) -> str:
         target_dir = self._get_target_dir(mailbox_id, email_source_id, email_date) / "attachments"
         target_dir.mkdir(parents=True, exist_ok=True)
-        file_path = target_dir / filename
+        file_path = target_dir / (str(uuid.uuid4()) + "-" + __import__("cardcue_api.mail.parser", fromlist=["sanitize_filename"]).sanitize_filename(filename))
         safe_path = self._verify_safe_path(file_path)
         safe_path.write_bytes(payload_bytes)
         return str(safe_path)

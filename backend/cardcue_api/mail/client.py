@@ -3,6 +3,9 @@
 import imaplib
 import re
 import ssl
+import socket
+from cardcue_api.admin.outbound import resolve_public
+from cardcue_api.config import settings
 from typing import Any
 
 
@@ -51,24 +54,30 @@ class ReadOnlyImapClient:
     def connect(self) -> None:
         """Establish connection and authenticate."""
         try:
+            ip = resolve_public(self.host, self.port)
+            address = (ip, self.port)
+            context = ssl.create_default_context()
+            class PinnedPlain(imaplib.IMAP4):
+                def _create_socket(inner, timeout):
+                    return socket.create_connection(address, timeout)
+            class PinnedTLS(imaplib.IMAP4_SSL):
+                def _create_socket(inner, timeout):
+                    raw = socket.create_connection(address, timeout)
+                    return context.wrap_socket(raw, server_hostname=inner.host)
             if self.use_ssl:
-                ssl_context = ssl.create_default_context()
-                self._client = imaplib.IMAP4_SSL(self.host, self.port, ssl_context=ssl_context)
+                self._client = PinnedTLS(self.host, self.port, ssl_context=context, timeout=self.timeout)
             else:
-                self._client = imaplib.IMAP4(self.host, self.port)
-                try:
-                    self._client.starttls()
-                except Exception:
-                    pass
+                self._client = PinnedPlain(self.host, self.port, timeout=self.timeout)
+                self._client.starttls(ssl_context=context)
 
             status, data = self._client.login(self.username, self.password)
             if status != "OK":
-                raise ImapAuthenticationError(f"IMAP login failed: {data}")
+                raise ImapAuthenticationError("IMAP login failed")
             self._connected = True
         except imaplib.IMAP4.error as e:
-            raise ImapAuthenticationError(f"IMAP authentication failed: {e}") from e
+            raise ImapAuthenticationError("IMAP authentication failed") from None
         except Exception as e:
-            raise ImapConnectionError(f"Failed to connect to IMAP server {self.host}:{self.port}: {e}") from e
+            raise ImapConnectionError("IMAP connection or TLS failed") from None
 
     def disconnect(self) -> None:
         """Close connection gracefully."""
@@ -171,11 +180,17 @@ class ReadOnlyImapClient:
     def fetch_email_bytes(self, uid: int, folder: str = "INBOX") -> bytes:
         """Fetch RFC822 raw message bytes using BODY.PEEK[] to guarantee read-only behavior."""
         self.select_folder(folder)
-        status, data = self._client.uid("FETCH", str(uid), "(BODY.PEEK[])")
+        size_status, size_data = self._client.uid("FETCH", str(uid), "(RFC822.SIZE)")
+        sizes = [int(n) for item in (size_data or []) if isinstance(item, bytes) for n in re.findall(rb"RFC822.SIZE (\d+)", item)]
+        if size_status != "OK" or not sizes or max(sizes) > settings.mail_max_bytes:
+            raise ImapClientError("Message size unavailable or exceeds limit")
+        status, data = self._client.uid("FETCH", str(uid), f"(BODY.PEEK[]<0.{settings.mail_max_bytes + 1}>)")
         if status != "OK" or not data:
             raise ImapClientError(f"Failed to fetch UID {uid}: status={status}")
 
         for part in data:
             if isinstance(part, tuple) and len(part) >= 2:
+                if len(part[1]) > settings.mail_max_bytes:
+                    raise ImapClientError("Message exceeds size limit")
                 return part[1]
         raise ImapClientError(f"Incomplete or empty fetch response for UID {uid}")

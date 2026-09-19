@@ -40,7 +40,8 @@ class DraftService:
         self.storage_manager = storage_manager or MailStorageManager()
         self.html_extractor = HtmlStatementExtractor()
         self.pdf_extractor = PdfStatementExtractor()
-        self.model_extractor = ModelStatementExtractor()
+        from cardcue_api.admin.model_runtime import ManagedExtractor
+        self.model_extractor = ManagedExtractor(None)
         self.mime_parser = MailMimeParser()
 
     async def _log_change(
@@ -78,7 +79,7 @@ class DraftService:
 
     async def get_draft(self, session: AsyncSession, draft_id: uuid.UUID) -> StatementDraftModel:
         """Get draft by ID."""
-        draft = await session.get(StatementDraftModel, draft_id)
+        draft = (await session.execute(select(StatementDraftModel).where(StatementDraftModel.id == draft_id).with_for_update())).scalar_one_or_none()
         if not draft:
             raise NotFoundError(f"Statement draft {draft_id} not found")
         return draft
@@ -119,8 +120,7 @@ class DraftService:
         email_body_text = ""
         if source.raw_storage_path and os.path.exists(source.raw_storage_path):
             try:
-                with open(source.raw_storage_path, "rb") as f:
-                    raw_bytes = f.read()
+                raw_bytes = self.storage_manager.read_file(source.raw_storage_path)
                 parsed_email = self.mime_parser.parse_bytes(raw_bytes)
                 if parsed_email.body_html:
                     email_body_text = self.html_extractor.html_to_text(parsed_email.body_html)
@@ -159,33 +159,20 @@ class DraftService:
         matched_account_id = None
         matched_card_id = None
 
-        # Check card tails
-        if extracted_draft.card_tails:
-            card_res = await session.execute(
-                select(Card).where(Card.tail.in_(extracted_draft.card_tails))
-            )
-            found_card = card_res.scalars().first()
-            if found_card:
-                matched_card_id = found_card.id
-                matched_account_id = found_card.account_id
-
-        # Check account reference or bank
-        if not matched_account_id and extracted_draft.account_reference:
-            acct_res = await session.execute(
-                select(Account).where(Account.reference == extracted_draft.account_reference)
-            )
-            found_acct = acct_res.scalars().first()
-            if found_acct:
-                matched_account_id = found_acct.id
-
-        if not matched_account_id and extracted_draft.bank:
-            acct_bank_res = await session.execute(
-                select(Account).where(Account.bank == extracted_draft.bank)
-            )
-            accts_with_bank = list(acct_bank_res.scalars().all())
-            if len(accts_with_bank) == 1:
-                # Unambiguous single account for this bank
-                matched_account_id = accts_with_bank[0].id
+        # A tail alone never establishes identity. Only unique bank + reference is a suggestion.
+        if extracted_draft.account_reference and extracted_draft.bank:
+            accounts = list((await session.execute(select(Account).where(
+                Account.reference == extracted_draft.account_reference,
+                Account.bank == extracted_draft.bank, Account.status == "active"
+            ))).scalars())
+            if len(accounts) == 1:
+                matched_account_id = accounts[0].id
+                cards = list((await session.execute(select(Card).where(
+                    Card.account_id == matched_account_id,
+                    Card.tail.in_(extracted_draft.card_tails or []), Card.status == "active"
+                ))).scalars())
+                if len(cards) == 1:
+                    matched_card_id = cards[0].id
 
         # Update review reasons
         review_reasons = list(extracted_draft.review_reasons)
@@ -196,50 +183,26 @@ class DraftService:
             if "unresolved:account" not in review_reasons:
                 review_reasons.append("unresolved:account")
 
-        # 4. Upsert StatementDraftModel
-        existing_draft_res = await session.execute(
-            select(StatementDraftModel).where(StatementDraftModel.email_source_id == source_id)
+        # Reprocessing creates a new review version and preserves manual work.
+        draft_model = StatementDraftModel(
+            email_source_id=source.id,
+            mailbox_id=source.mailbox_id,
+            status="pending_review",
+            bank=extracted_draft.bank,
+            currency=extracted_draft.currency,
+            amount_minor=extracted_draft.amount_minor,
+            minimum_minor=extracted_draft.minimum_minor,
+            statement_date=extracted_draft.statement_date,
+            due_date=extracted_draft.due_date,
+            account_reference=extracted_draft.account_reference,
+            card_tails=extracted_draft.card_tails,
+            evidence=[e.model_dump() for e in extracted_draft.evidence],
+            review_reasons=review_reasons,
+            matched_account_id=matched_account_id,
+            matched_card_id=matched_card_id,
+            extractor_name=extractor_name,
         )
-        draft_model = existing_draft_res.scalar_one_or_none()
-
-        if draft_model:
-            if draft_model.status == "confirmed":
-                # Already confirmed, do not overwrite
-                return draft_model
-            # Update existing draft
-            draft_model.bank = extracted_draft.bank
-            draft_model.currency = extracted_draft.currency
-            draft_model.amount_minor = extracted_draft.amount_minor
-            draft_model.minimum_minor = extracted_draft.minimum_minor
-            draft_model.statement_date = extracted_draft.statement_date
-            draft_model.due_date = extracted_draft.due_date
-            draft_model.account_reference = extracted_draft.account_reference
-            draft_model.card_tails = extracted_draft.card_tails
-            draft_model.evidence = [e.model_dump() for e in extracted_draft.evidence]
-            draft_model.review_reasons = review_reasons
-            draft_model.matched_account_id = matched_account_id
-            draft_model.matched_card_id = matched_card_id
-            draft_model.extractor_name = extractor_name
-        else:
-            draft_model = StatementDraftModel(
-                email_source_id=source.id,
-                mailbox_id=source.mailbox_id,
-                status="pending_review",
-                bank=extracted_draft.bank,
-                currency=extracted_draft.currency,
-                amount_minor=extracted_draft.amount_minor,
-                minimum_minor=extracted_draft.minimum_minor,
-                statement_date=extracted_draft.statement_date,
-                due_date=extracted_draft.due_date,
-                account_reference=extracted_draft.account_reference,
-                card_tails=extracted_draft.card_tails,
-                evidence=[e.model_dump() for e in extracted_draft.evidence],
-                review_reasons=review_reasons,
-                matched_account_id=matched_account_id,
-                matched_card_id=matched_card_id,
-                extractor_name=extractor_name,
-            )
-            session.add(draft_model)
+        session.add(draft_model)
 
         source.parse_status = "parsed"
         await session.flush()
@@ -255,16 +218,31 @@ class DraftService:
         confirmed_by: str = "device",
     ) -> tuple[Statement, StatementVersion, StatementDraftModel]:
         """Confirm a draft into an official Statement and StatementVersion in an atomic transaction."""
-        draft = await session.get(StatementDraftModel, draft_id)
+        draft = (await session.execute(select(StatementDraftModel).where(StatementDraftModel.id == draft_id).with_for_update())).scalar_one_or_none()
         if not draft:
             raise NotFoundError(f"Statement draft {draft_id} not found")
 
+        from cardcue_api.admin.models import CommandReceipt
+        import hashlib
+        fingerprint = hashlib.sha256((str(draft_id) + req.model_dump_json()).encode()).hexdigest()
+        receipt_id = req.request_id or draft_id
+        receipt = await session.get(CommandReceipt, receipt_id)
+        if receipt:
+            if receipt.fingerprint != fingerprint:
+                raise ConflictError("Request ID already used with different content")
+            ver = await session.get(StatementVersion, uuid.UUID(receipt.result["version_id"]))
+            stmt = await session.get(Statement, ver.statement_id)
+            return stmt, ver, draft
         if draft.status != "pending_review":
             raise ConflictError(f"Draft is already {draft.status}; cannot confirm")
+        if req.expected_revision is not None and draft.revision != req.expected_revision:
+            raise ConflictError("Draft changed; reload before confirming")
 
         # Resolve values: explicit request override takes precedence
         account_id = req.account_id
-        currency = req.currency or draft.currency or "CNY"
+        currency = req.currency or draft.currency
+        if currency not in ("CNY", "USD"):
+            raise ConflictError("Explicit supported currency is required")
         amount_minor = req.amount_minor if req.amount_minor is not None else draft.amount_minor
         minimum_minor = req.minimum_minor if req.minimum_minor is not None else draft.minimum_minor
         statement_date = req.statement_date or draft.statement_date
@@ -285,9 +263,12 @@ class DraftService:
                 raise ConflictError("minimum_minor cannot exceed amount_minor")
 
         # Check Account exists
-        acct = await session.get(Account, account_id)
+        acct = (await session.execute(select(Account).where(Account.id == account_id).with_for_update())).scalar_one_or_none()
         if not acct:
             raise NotFoundError(f"Account {account_id} not found")
+
+        if acct.status != "active":
+            raise ConflictError("Account is archived")
 
         # Check Card belongs to account if provided
         if card_id:
@@ -305,12 +286,17 @@ class DraftService:
                     Statement.statement_date == statement_date,
                 )
             )
-            .options(selectinload(Statement.versions))
+            .options(selectinload(Statement.versions)).with_for_update()
         )
         existing_stmt = stmt_res.scalar_one_or_none()
 
         if existing_stmt:
             stmt = existing_stmt
+            if req.expected_statement_version_id != stmt.current_version_id:
+                raise ConflictError("Existing bill requires explicit current version confirmation")
+            from cardcue_api.services.billing import BillingService
+            if amount_minor < await BillingService()._active_paid(session, stmt.id):
+                raise ConflictError("Amount cannot be lower than active payments")
             max_v = max((v.version_number for v in stmt.versions), default=0)
             ver = StatementVersion(
                 statement_id=stmt.id,
@@ -391,13 +377,14 @@ class DraftService:
             })
 
         # Update draft
+        draft.revision += 1
+        session.add(CommandReceipt(id=receipt_id, fingerprint=fingerprint, result={"version_id": str(ver.id)}))
         draft.status = "confirmed"
         draft.confirmed_version_id = ver.id
         draft.matched_account_id = account_id
         draft.matched_card_id = card_id
 
         await session.flush()
-        await session.commit()
         await session.refresh(draft)
         await session.refresh(stmt)
         await session.refresh(ver)
@@ -408,15 +395,19 @@ class DraftService:
         session: AsyncSession,
         draft_id: uuid.UUID,
         reason: str,
+        expected_revision: int | None = None,
     ) -> StatementDraftModel:
         """Reject an unneeded draft."""
-        draft = await session.get(StatementDraftModel, draft_id)
+        draft = (await session.execute(select(StatementDraftModel).where(StatementDraftModel.id == draft_id).with_for_update())).scalar_one_or_none()
         if not draft:
             raise NotFoundError(f"Statement draft {draft_id} not found")
 
         if draft.status != "pending_review":
             raise ConflictError(f"Draft is already {draft.status}; cannot reject")
 
+        if expected_revision is not None and draft.revision != expected_revision:
+            raise ConflictError("Draft changed; reload before rejecting")
+        draft.revision += 1
         draft.status = "rejected"
         draft.rejection_reason = reason
         await session.flush()
@@ -451,7 +442,7 @@ class DraftService:
                 results.append(draft)
             except Exception as e:
                 source.parse_status = "failed"
-                source.error_message = str(e)
+                source.error_message = "parse_failed"
                 await session.flush()
                 await session.commit()
         return results

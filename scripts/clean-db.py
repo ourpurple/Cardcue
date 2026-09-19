@@ -14,20 +14,21 @@ TABLES_TO_TRUNCATE = [
     "email_sources",
     "mail_jobs",
     "mail_cursors",
-    "mailboxes",
     "devices",
 ]
 
 def main():
-    print(f"Connecting to database...")
+    print("Connecting to database...")
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
     cur = conn.cursor()
     try:
         tables_str = ", ".join(TABLES_TO_TRUNCATE)
         cur.execute(f"TRUNCATE TABLE {tables_str} CASCADE;")
+        cur.execute("ALTER SEQUENCE change_seq RESTART WITH 1;")
+        cur.execute("UPDATE mailboxes SET status = 'active', error_message = NULL WHERE email_address = 'ourpurple@sina.com';")
         conn.commit()
-        print("Successfully truncated tables.")
+        print("Successfully truncated tables and reset change_seq sequence.")
 
         print("\nVerifying row counts:")
         for t in TABLES_TO_TRUNCATE:

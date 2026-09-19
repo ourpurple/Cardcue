@@ -2,21 +2,28 @@ package com.cardcue.app.feature.settings
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cardcue.app.common.ui.*
 
 @Composable
-fun SettingsScreen(modifier: Modifier) {
+fun SettingsScreen(
+    modifier: Modifier = Modifier,
+    onResetAllData: () -> Unit = {}
+) {
+    var showResetDialog by remember { mutableStateOf(false) }
+
     LazyColumn(modifier, contentPadding = PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item { PageHeader("我的 CardCue", "一个安静、清楚的私人账单本") }
         item {
@@ -32,6 +39,34 @@ fun SettingsScreen(modifier: Modifier) {
         }
         item {
             Column(Modifier.padding(horizontal = 20.dp)) {
+                SectionCard("数据管理") {
+                    Text(
+                        "清空本地数据将清除本设备上的所有演示账单、缓存数据及还款记录，使 App 回到初始状态并重新从后台同步最新权威账单。",
+                        color = Muted,
+                        fontSize = 13.sp,
+                        lineHeight = 22.sp
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Button(
+                        onClick = { showResetDialog = true },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Red.copy(alpha = 0.12f),
+                            contentColor = Red
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings-reset-button")
+                    ) {
+                        Icon(Icons.Outlined.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("清空本地数据（回到初始状态）", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+        }
+        item {
+            Column(Modifier.padding(horizontal = 20.dp)) {
                 SectionCard("数据说明") {
                     Text("此版本内置演示账单与后台同步，不代表你的真实欠款。还款记录只用于个人管理，不执行真实转账。", color = Muted, fontSize = 13.sp, lineHeight = 22.sp)
                     Spacer(Modifier.height(12.dp))
@@ -39,7 +74,32 @@ fun SettingsScreen(modifier: Modifier) {
                 }
             }
         }
-        item { Text("CardCue  0.1.0\nEvery bill. On time.", color = Muted, fontSize = 12.sp, lineHeight = 22.sp, modifier = Modifier.padding(horizontal = 26.dp, vertical = 8.dp)) }
+        item { Text("CardCue v0.1.0\nEvery bill. On time.", color = Muted, fontSize = 12.sp, lineHeight = 22.sp, modifier = Modifier.padding(horizontal = 26.dp, vertical = 8.dp)) }
+    }
+
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            icon = { Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = Red) },
+            title = { Text("确认清空并回到初始状态？") },
+            text = { Text("此操作将清除本地的所有演示账单、还款记录与本地缓存，并重新从后台获取最新账单数据。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showResetDialog = false
+                        onResetAllData()
+                    },
+                    modifier = Modifier.testTag("settings-confirm-reset-button")
+                ) {
+                    Text("确认清空", color = Red, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 }
 

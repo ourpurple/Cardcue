@@ -129,202 +129,122 @@ class MailSyncService:
             return True
         except Exception as e:
             mailbox.status = "error"
-            mailbox.error_message = str(e)
+            mailbox.error_message = "connection_failed"
             await self.session.commit()
             raise
 
-    async def sync_mailbox(
-        self,
-        mailbox_id: uuid.UUID,
-        trigger_type: str = "manual",
-        client_override: Any = None,
-        folder: str = "INBOX",
-        since_date: Any = None,
-    ) -> MailJob:
-        """Perform synchronization for a mailbox with read-only safety, incremental cursor, and deduplication."""
+    async def sync_mailbox(self, mailbox_id, trigger_type="manual", client_override=None,
+                           folder="INBOX", since_date=None, progress=None):
+        import asyncio
+        import inspect
+        from datetime import timedelta
         mailbox = await self.get_mailbox(mailbox_id)
-
-        # Check concurrency guard: cannot run two jobs simultaneously for the same mailbox
-        running_job_stmt = select(MailJob).where(
-            MailJob.mailbox_id == mailbox_id,
-            MailJob.status == "running",
-        )
-        running_job = (await self.session.execute(running_job_stmt)).scalar_one_or_none()
-        if running_job:
-            raise MailSyncConflictError(f"A sync job {running_job.id} is already running for mailbox {mailbox_id}")
-
-        # Create running MailJob
-        job = MailJob(
-            mailbox_id=mailbox_id,
-            trigger_type=trigger_type,
-            status="running",
-            started_at=datetime.now(timezone.utc),
-        )
+        config = mailbox.settings_json or {}
+        folder = config.get("folder", folder)
+        running = (await self.session.execute(select(MailJob).where(MailJob.mailbox_id == mailbox_id, MailJob.status == "running"))).scalars().first()
+        if running:
+            raise MailSyncConflictError("Mailbox already has a running job")
+        job = MailJob(mailbox_id=mailbox_id, trigger_type=trigger_type, status="running", started_at=datetime.now(timezone.utc))
         self.session.add(job)
+        mailbox.last_attempt_at = datetime.now(timezone.utc)
         await self.session.commit()
-        await self.session.refresh(job)
-
-        plain_token = decrypt_token(mailbox.encrypted_auth_token)
-        imap_client = client_override or ReadOnlyImapClient(
-            host=mailbox.imap_host,
-            port=mailbox.imap_port,
-            username=mailbox.email_address,
-            password=plain_token,
-            use_ssl=mailbox.use_ssl,
-        )
-
+        job_id = job.id
+        client = client_override or ReadOnlyImapClient(host=mailbox.imap_host, port=mailbox.imap_port,
+            username=config.get("username") or mailbox.email_address,
+            password=decrypt_token(mailbox.encrypted_auth_token), use_ssl=mailbox.use_ssl)
+        async def call(method, *args, **kwargs):
+            return await asyncio.to_thread(method, *args, **kwargs)
         try:
-            # If not an injected mock context, connect
-            if not hasattr(imap_client, "_is_mock"):
-                imap_client.connect()
-
-            # 1. Fetch folder status and check UIDVALIDITY
-            uidvalidity, uidnext, total_messages = imap_client.get_folder_status(folder)
-
-            cursor_stmt = select(MailCursor).where(
-                MailCursor.mailbox_id == mailbox_id,
-                MailCursor.folder == folder,
-            )
-            cursor = (await self.session.execute(cursor_stmt)).scalar_one_or_none()
+            if not hasattr(client, "_is_mock"):
+                await call(client.connect)
+            validity, _, _ = await call(client.get_folder_status, folder)
+            cursor = (await self.session.execute(select(MailCursor).where(MailCursor.mailbox_id == mailbox_id, MailCursor.folder == folder))).scalar_one_or_none()
             if not cursor:
-                cursor = MailCursor(
-                    mailbox_id=mailbox_id,
-                    folder=folder,
-                    uidvalidity=uidvalidity,
-                    last_uid=0,
-                )
+                cursor = MailCursor(mailbox_id=mailbox_id, folder=folder, uidvalidity=validity, last_uid=0)
                 self.session.add(cursor)
-                await self.session.flush()
-            else:
-                # UIDVALIDITY change indicates mailbox re-indexing or reset on server
-                if cursor.uidvalidity > 0 and cursor.uidvalidity != uidvalidity:
-                    logger.warning(
-                        "UIDVALIDITY mismatch for mailbox %s folder %s (%d != %d). Resetting last_uid.",
-                        mailbox_id,
-                        folder,
-                        cursor.uidvalidity,
-                        uidvalidity,
-                    )
-                    cursor.last_uid = 0
-                cursor.uidvalidity = uidvalidity
-
-            # 2. Search new UIDs strictly > cursor.last_uid
-            import inspect
-            sig = inspect.signature(imap_client.search_uids_since)
-            if "since_date" in sig.parameters:
-                uids_to_fetch = imap_client.search_uids_since(cursor.last_uid, folder=folder, since_date=since_date)
-            else:
-                uids_to_fetch = imap_client.search_uids_since(cursor.last_uid, folder=folder)
-
-            # 3. Fetch and process each email
-            for uid in uids_to_fetch:
+            elif cursor.uidvalidity != validity:
+                cursor.last_uid, cursor.uidvalidity = 0, validity
+            # An explicit backfill does not change the incremental cursor backwards.
+            start_uid = 0 if since_date is not None else cursor.last_uid
+            cutoff = since_date
+            if cutoff is None and cursor.last_uid == 0:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=config.get("since_days", 90))).date()
+            kwargs = {"folder": folder}
+            if "since_date" in inspect.signature(client.search_uids_since).parameters:
+                kwargs["since_date"] = cutoff
+            uids = await call(client.search_uids_since, start_uid, **kwargs)
+            known = set((await self.session.execute(select(EmailSource.uid).where(EmailSource.mailbox_id == mailbox_id,
+                EmailSource.folder == folder, EmailSource.uidvalidity == validity))).scalars())
+            uids = [uid for uid in sorted(set(uids)) if uid not in known][:config.get("max_messages", 100)]
+            for uid in uids:
+                if progress and not await progress({"checked": job.emails_checked, "fetched": job.emails_fetched}):
+                    job.status = "cancelled"
+                    break
                 job.emails_checked += 1
-
-                # Check if this exact UID was already recorded
-                existing_source = (
-                    await self.session.execute(
-                        select(EmailSource).where(
-                            EmailSource.mailbox_id == mailbox_id,
-                            EmailSource.folder == folder,
-                            EmailSource.uidvalidity == uidvalidity,
-                            EmailSource.uid == uid,
-                        )
-                    )
-                ).scalar_one_or_none()
-
-                if existing_source:
-                    cursor.last_uid = max(cursor.last_uid, uid)
-                    continue
-
-                # Fetch bytes with read-only guarantee (BODY.PEEK)
-                raw_bytes = imap_client.fetch_email_bytes(uid, folder=folder)
-                job.emails_fetched += 1
-
-                parsed = parse_email_bytes(raw_bytes)
-                is_candidate, reason = classify_email(parsed.sender, parsed.subject, parsed.body_text)
-
-                source_id = uuid.uuid4()
-                # Persist raw email to disk
-                raw_path = self.storage.save_raw_email(
-                    mailbox_id=mailbox_id,
-                    email_source_id=source_id,
-                    raw_bytes=raw_bytes,
-                    email_date=parsed.email_date,
-                )
-
-                email_source = EmailSource(
-                    id=source_id,
-                    mailbox_id=mailbox_id,
-                    folder=folder,
-                    uid=uid,
-                    uidvalidity=uidvalidity,
-                    message_id=parsed.message_id,
-                    subject=parsed.subject,
-                    sender=parsed.sender,
-                    recipient=parsed.recipient,
-                    email_date=parsed.email_date,
-                    body_hash=parsed.body_hash,
-                    raw_storage_path=raw_path,
-                    has_attachments=len(parsed.attachments) > 0,
-                    is_statement_candidate=is_candidate,
-                    parse_status="pending",
-                )
-                self.session.add(email_source)
-
-                # Persist attachments
-                for att in parsed.attachments:
-                    att_path = self.storage.save_attachment(
-                        mailbox_id=mailbox_id,
-                        email_source_id=source_id,
-                        filename=att.filename,
-                        payload_bytes=att.payload_bytes,
-                        email_date=parsed.email_date,
-                    )
-                    email_att = EmailAttachment(
-                        email_source_id=source_id,
-                        filename=att.filename,
-                        content_type=att.content_type,
-                        size_bytes=att.size_bytes,
-                        storage_path=att_path,
-                    )
-                    self.session.add(email_att)
-
-                if is_candidate:
-                    job.statement_candidates += 1
-
-                cursor.last_uid = max(cursor.last_uid, uid)
-                await self.session.flush()
-
-            # Finish job successfully
-            job.status = "completed"
-            job.finished_at = datetime.now(timezone.utc)
-            mailbox.last_checked_at = datetime.now(timezone.utc)
-            mailbox.status = "active"
-            mailbox.error_message = None
-            await self.session.commit()
-            await self.session.refresh(job)
-
-        except Exception as e:
-            logger.exception("Error syncing mailbox %s: %s", mailbox_id, e)
-            job.status = "failed"
-            job.finished_at = datetime.now(timezone.utc)
-            job.error_message = str(e)
-            mailbox.error_message = str(e)
-            if isinstance(e, (ImapAuthenticationError,)):
-                mailbox.status = "auth_error"
-            else:
-                mailbox.status = "sync_error"
-            await self.session.commit()
-            await self.session.refresh(job)
-            raise
-        finally:
-            if not hasattr(imap_client, "_is_mock"):
                 try:
-                    imap_client.disconnect()
+                    raw = await call(client.fetch_email_bytes, uid, folder=folder)
+                    parsed = parse_email_bytes(raw)
+                    candidate, _ = classify_email(parsed.sender, parsed.subject, parsed.body_text)
+                    sender_filter, subject_filter = config.get("sender_filter", ""), config.get("subject_filter", "")
+                    if sender_filter and not any(term.strip().lower() in parsed.sender.lower() for term in sender_filter.split(",") if term.strip()):
+                        candidate = False
+                    if subject_filter and not any(term.strip().lower() in parsed.subject.lower() for term in subject_filter.split(",") if term.strip()):
+                        candidate = False
+                    existing_hash = (await self.session.execute(select(EmailSource.id).where(EmailSource.mailbox_id == mailbox_id,
+                        EmailSource.body_hash == parsed.body_hash, EmailSource.subject == parsed.subject,
+                        EmailSource.sender == parsed.sender, EmailSource.email_date == parsed.email_date).limit(1))).first()
+                    source_id = uuid.uuid4()
+                    keep = candidate or config.get("keep_non_candidates", False)
+                    source = EmailSource(id=source_id, mailbox_id=mailbox_id, folder=folder, uid=uid, uidvalidity=validity,
+                        message_id=parsed.message_id, subject=parsed.subject[:500], sender=parsed.sender[:255], recipient=parsed.recipient[:255],
+                        email_date=parsed.email_date, body_hash=parsed.body_hash, has_attachments=bool(parsed.attachments),
+                        is_statement_candidate=candidate, parse_status="duplicate" if existing_hash else ("pending" if candidate else "ignored"))
+                    self.session.add(source)
+                    if keep and not existing_hash:
+                        source.raw_storage_path = self.storage.save_raw_email(mailbox_id, source_id, raw, parsed.email_date)
+                        for att in parsed.attachments:
+                            if att.size_bytes > config.get("max_attachment_mb", 10) * 1024 * 1024:
+                                source.error_message = "attachment_exceeds_limit"
+                                continue
+                            path = self.storage.save_attachment(mailbox_id, source_id, att.filename, att.payload_bytes, parsed.email_date)
+                            self.session.add(EmailAttachment(email_source_id=source_id, filename=att.filename,
+                                content_type=att.content_type, size_bytes=att.size_bytes, storage_path=path))
+                        job.emails_fetched += 1
+                    if candidate and not existing_hash:
+                        job.statement_candidates += 1
+                    cursor.last_uid = max(cursor.last_uid, uid)
+                    await self.session.commit()
                 except Exception:
-                    pass
-
-        return job
+                    # Preserve the checkpoint but do not advance past an unread message. Manual retry can recover it.
+                    await self.session.rollback()
+                    job = await self.session.get(MailJob, job_id)
+                    job.status, job.error_message = "failed", "message_processing_failed"
+                    break
+            if job.status == "running":
+                job.status = "completed"
+            job.finished_at = datetime.now(timezone.utc)
+            mailbox = await self.session.get(Mailbox, mailbox_id, populate_existing=True)
+            if job.status == "completed":
+                mailbox.last_checked_at = datetime.now(timezone.utc)
+                mailbox.error_message = None
+                if mailbox.is_active:
+                    mailbox.status = "active"
+            await self.session.commit()
+            return job
+        except Exception as exc:
+            await self.session.rollback()
+            job = await self.session.get(MailJob, job_id)
+            mailbox = await self.session.get(Mailbox, mailbox_id)
+            job.status, job.finished_at = "failed", datetime.now(timezone.utc)
+            job.error_message = "imap_authentication_failed" if isinstance(exc, ImapAuthenticationError) else "imap_sync_failed"
+            mailbox.error_message = job.error_message
+            if mailbox.is_active:
+                mailbox.status = "auth_error" if isinstance(exc, ImapAuthenticationError) else "sync_error"
+            await self.session.commit()
+            raise RuntimeError(job.error_message) from None
+        finally:
+            if not hasattr(client, "_is_mock"):
+                await call(client.disconnect)
 
     async def list_jobs(self, mailbox_id: uuid.UUID | None = None, limit: int = 50) -> list[MailJob]:
         stmt = select(MailJob).order_by(desc(MailJob.created_at)).limit(limit)

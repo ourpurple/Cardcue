@@ -33,3 +33,5 @@ __all__ = [
     "EmailAttachment",
     "StatementDraftModel",
 ]
+
+from cardcue_api.admin import models as admin_models
