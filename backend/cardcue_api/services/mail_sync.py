@@ -139,6 +139,7 @@ class MailSyncService:
         trigger_type: str = "manual",
         client_override: Any = None,
         folder: str = "INBOX",
+        since_date: Any = None,
     ) -> MailJob:
         """Perform synchronization for a mailbox with read-only safety, incremental cursor, and deduplication."""
         mailbox = await self.get_mailbox(mailbox_id)
@@ -208,7 +209,12 @@ class MailSyncService:
                 cursor.uidvalidity = uidvalidity
 
             # 2. Search new UIDs strictly > cursor.last_uid
-            uids_to_fetch = imap_client.search_uids_since(cursor.last_uid, folder=folder)
+            import inspect
+            sig = inspect.signature(imap_client.search_uids_since)
+            if "since_date" in sig.parameters:
+                uids_to_fetch = imap_client.search_uids_since(cursor.last_uid, folder=folder, since_date=since_date)
+            else:
+                uids_to_fetch = imap_client.search_uids_since(cursor.last_uid, folder=folder)
 
             # 3. Fetch and process each email
             for uid in uids_to_fetch:

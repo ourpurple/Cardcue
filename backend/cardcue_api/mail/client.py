@@ -136,13 +136,23 @@ class ReadOnlyImapClient:
         except (ValueError, TypeError, IndexError):
             return 0
 
-    def search_uids_since(self, last_uid: int = 0, folder: str = "INBOX") -> list[int]:
-        """Search for message UIDs strictly greater than last_uid."""
+    def search_uids_since(
+        self,
+        last_uid: int = 0,
+        folder: str = "INBOX",
+        since_date: Any = None,
+    ) -> list[int]:
+        """Search for message UIDs strictly greater than last_uid, optionally after since_date."""
         self.select_folder(folder)
-        if last_uid <= 0:
-            status, data = self._client.uid("SEARCH", None, "ALL")
-        else:
-            status, data = self._client.uid("SEARCH", None, f"UID {last_uid + 1}:*")
+        query_parts = []
+        if last_uid > 0:
+            query_parts.append(f"UID {last_uid + 1}:*")
+        if since_date is not None:
+            # IMAP date format: 01-Jan-2026
+            query_parts.append(f'SINCE {since_date.strftime("%d-%b-%Y")}')
+
+        query = " ".join(query_parts) if query_parts else "ALL"
+        status, data = self._client.uid("SEARCH", None, query)
 
         if status != "OK" or not data:
             return []

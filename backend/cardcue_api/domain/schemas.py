@@ -251,6 +251,7 @@ class EmailSourceOut(BaseModel):
 class MailSyncTriggerRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mailbox_id: uuid.UUID | None = None
+    since_days: int | None = Field(default=None, ge=1, le=365)
 
 
 class MailSyncTriggerResponse(BaseModel):

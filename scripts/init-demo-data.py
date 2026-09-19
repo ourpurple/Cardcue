@@ -22,8 +22,8 @@ SAMPLE_ACCOUNTS = [
         "alias": "招行个人经典信用卡",
         "reference": "CMB_001",
         "cards": [
-            {"card_tail": "9759", "card_holder": "持卡人", "color_hex": "#C25259", "card_type": "credit"},
-            {"card_tail": "2090", "card_holder": "持卡人", "color_hex": "#C25259", "card_type": "credit"},
+            {"card_tail": "9759", "card_holder": "主卡", "color_hex": "#C25259", "card_type": "credit"},
+            {"card_tail": "2090", "card_holder": "附属卡", "color_hex": "#C25259", "card_type": "credit"},
         ],
     },
     {
@@ -31,7 +31,7 @@ SAMPLE_ACCOUNTS = [
         "alias": "交行买单吧信用卡",
         "reference": "BCM_001",
         "cards": [
-            {"card_tail": "8369", "card_holder": "持卡人", "color_hex": "#3476C3", "card_type": "credit"},
+            {"card_tail": "8369", "card_holder": "主卡", "color_hex": "#3476C3", "card_type": "credit"},
         ],
     },
     {
@@ -39,13 +39,13 @@ SAMPLE_ACCOUNTS = [
         "alias": "农行金穗悠游信用卡",
         "reference": "ABC_001",
         "cards": [
-            {"card_tail": "8753", "card_holder": "持卡人", "color_hex": "#208979", "card_type": "credit"},
+            {"card_tail": "8753", "card_holder": "主卡", "color_hex": "#208979", "card_type": "credit"},
         ],
     },
 ]
 
 
-def request(url: str, method: str = "GET", data: dict | None = None) -> dict:
+def request(url: str, method: str = "GET", data: dict | list | None = None) -> dict | list:
     req_body = json.dumps(data).encode("utf-8") if data is not None else None
     req = urllib.request.Request(
         url,
@@ -54,8 +54,9 @@ def request(url: str, method: str = "GET", data: dict | None = None) -> dict:
         method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body) if body else {}
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8")
         try:
@@ -70,7 +71,7 @@ def request(url: str, method: str = "GET", data: dict | None = None) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="CardCue 测试数据初始化工具")
     parser.add_argument("--server", default=DEFAULT_SERVER, help="后台服务根地址 (默认: %(default)s)")
-    parser.add_argument("--force", action="store_true", help="强制重复创建已有账户")
+    parser.add_argument("--force", action="store_true", help="强制更新已有账户的卡片")
     args = parser.parse_args()
 
     server = args.server.rstrip("/")
@@ -84,34 +85,49 @@ def main():
 
     print("\n正在获取当前账户列表...")
     existing = request(f"{server}/v1/accounts")
-    existing_banks = {a["bank"] for a in existing}
-    print(f"当前已有账户数: {len(existing)} (包含银行: {list(existing_banks) or '无'})")
+    bank_map = {a["bank"]: a for a in existing}
+    print(f"当前已有账户数: {len(existing)} (包含银行: {list(bank_map.keys()) or '无'})")
 
-    if existing and not args.force:
-        print("已有账户存在，跳过初始化。若要继续添加，请使用 --force 参数。")
-        return
-
-    print("\n正在初始化测试银行账户与卡片...")
+    print("\n正在初始化基础银行账户与卡片...")
     for item in SAMPLE_ACCOUNTS:
-        if item["bank"] in existing_banks and not args.force:
-            print(f"- 跳过已有银行: {item['bank']}")
-            continue
+        bank = item["bank"]
+        if bank not in bank_map:
+            acct_payload = {
+                "bank": bank,
+                "alias": item["alias"],
+                "reference": item["reference"],
+            }
+            try:
+                acct = request(f"{server}/v1/accounts", method="POST", data=acct_payload)
+                bank_map[bank] = acct
+                print(f"[OK] 创建账户成功: {bank} (ID: {acct['id']})")
+            except Exception as e:
+                print(f"[FAIL] 创建账户失败 ({bank}): {e}")
+                continue
+        else:
+            acct = bank_map[bank]
+            print(f"[-] 账户已存在: {bank}")
 
-        acct_payload = {
-            "bank": item["bank"],
-            "alias": item["alias"],
-            "reference": item["reference"],
-        }
-        try:
-            created_acct = request(f"{server}/v1/accounts", method="POST", data=acct_payload)
-            acct_id = created_acct["id"]
-            print(f"[OK] 创建账户成功: {item['bank']} (ID: {acct_id})")
+        acct_id = acct["id"]
+        # Fetch existing cards
+        existing_cards = request(f"{server}/v1/accounts/{acct_id}/cards")
+        existing_tails = {c["tail"] for c in existing_cards}
 
-            for card in item["cards"]:
-                created_card = request(f"{server}/v1/accounts/{acct_id}/cards", method="POST", data=card)
-                print(f"  |-- 绑定卡片: 尾号 {card['card_tail']} (ID: {created_card['id']})")
-        except Exception as e:
-            print(f"[FAIL] 创建账户/卡片失败 ({item['bank']}): {e}")
+        for card in item["cards"]:
+            tail = card["card_tail"]
+            if tail in existing_tails and not args.force:
+                print(f"  |-- 卡片已存在: 尾号 {tail}")
+                continue
+            card_payload = {
+                "account_id": acct_id,
+                "tail": tail,
+                "display_name": f"{bank}{card.get('card_holder', '')} ({tail})",
+            }
+            try:
+                created_card = request(f"{server}/v1/cards", method="POST", data=card_payload)
+                print(f"  |-- 绑定卡片: 尾号 {tail} (ID: {created_card['id']})")
+            except Exception as e:
+                print(f"  |-- [!] 绑定卡片失败 (尾号 {tail}): {e}")
 
     print("\n初始化完成！App 启动或点击同步时将自动下载以上账户与卡片。")
 

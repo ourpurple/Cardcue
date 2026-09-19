@@ -145,11 +145,17 @@ async def trigger_mail_sync(
     if not targets:
         return MailSyncTriggerResponse(job_ids=[], message="No active mailboxes to sync")
 
+    since_date = None
+    if body and body.since_days:
+        from datetime import date, timedelta
+        since_date = date.today() - timedelta(days=body.since_days)
+
+
     job_ids = []
     for mb in targets:
         # Pre-create running job or dispatch background task
         try:
-            job = await service.sync_mailbox(mailbox_id=mb.id, trigger_type="manual")
+            job = await service.sync_mailbox(mailbox_id=mb.id, trigger_type="manual", since_date=since_date)
             job_ids.append(job.id)
         except MailSyncConflictError:
             # Already running, fetch existing running job ID
