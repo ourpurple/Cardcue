@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: cardcue-backend
+Version: 0.3.0
+Summary: CardCue backend – statement storage and sync service
+Requires-Python: >=3.11
+Requires-Dist: fastapi<1.0,>=0.115
+Requires-Dist: uvicorn<1.0,>=0.30
+Requires-Dist: pydantic<3.0,>=2.9
+Requires-Dist: pydantic-settings<3.0,>=2.4
+Requires-Dist: sqlalchemy[asyncio]<3.0,>=2.0
+Requires-Dist: asyncpg<1.0,>=0.29
+Requires-Dist: alembic<2.0,>=1.14
+Requires-Dist: python-dotenv<2.0,>=1.0
+Requires-Dist: psycopg2-binary<3.0,>=2.9
+Requires-Dist: cryptography>=43.0.0
+Provides-Extra: test
+Requires-Dist: pytest<10,>=8; extra == "test"
+Requires-Dist: pytest-asyncio<1.0,>=0.24; extra == "test"
+Requires-Dist: httpx<1.0,>=0.27; extra == "test"

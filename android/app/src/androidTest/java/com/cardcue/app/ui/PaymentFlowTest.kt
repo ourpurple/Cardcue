@@ -1,4 +1,4 @@
-package com.cardcue.app.ui
+﻿package com.cardcue.app.ui
 
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
@@ -26,10 +26,10 @@ class PaymentFlowTest {
     private fun bill() = runBlocking { database.repository.bills.first().first { it.statement.id == "demo-bcm" } }
 
     private fun awaitBalance(text: String) {
-        compose.onNodeWithTag("bill-detail-list").performScrollToNode(hasTestTag("detail-remaining"))
         compose.waitUntil(15_000) {
             compose.onAllNodes(hasTestTag("detail-remaining") and hasText(text)).fetchSemanticsNodes().isNotEmpty()
         }
+        compose.onNodeWithTag("bill-detail-list").performScrollToNode(hasTestTag("detail-remaining"))
         compose.onNodeWithTag("detail-remaining").assertTextEquals(text).assertIsDisplayed()
     }
 
@@ -95,11 +95,17 @@ class PaymentFlowTest {
         compose.onNodeWithContentDescription("返回").performClick()
         compose.onNodeWithTag("tab-1").performClick()
         compose.onNodeWithTag("history-filter-2").performClick()
+        compose.waitUntil(15_000) {
+            compose.onAllNodesWithTag("history-bill-demo-old-bcm").fetchSemanticsNodes().isNotEmpty()
+        }
         compose.onNodeWithTag("history-bill-demo-old-bcm").assertIsDisplayed().performClick()
         awaitBalance("¥0.00")
         compose.onNodeWithContentDescription("返回").performClick()
         compose.onNodeWithTag("history-filter-2").assertIsSelected()
         compose.onNodeWithTag("history-filter-1").performClick()
+        compose.waitUntil(15_000) {
+            compose.onAllNodesWithTag("history-bill-demo-old-bcm").fetchSemanticsNodes().isEmpty()
+        }
         compose.onNodeWithTag("history-bill-demo-old-bcm").assertDoesNotExist()
         assertTrue(bill().payments.isEmpty())
     }

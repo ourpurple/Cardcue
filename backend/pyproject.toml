@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cardcue-backend"
-version = "0.2.0"
+version = "0.3.0"
 description = "CardCue backend – statement storage and sync service"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,6 +17,9 @@ dependencies = [
     "alembic>=1.14,<2.0",
     "python-dotenv>=1.0,<2.0",
     "psycopg2-binary>=2.9,<3.0",
+    "cryptography>=43.0.0",
+    "lxml>=5.0,<7.0",
+    "PyMuPDF>=1.24,<2.0",
 ]
 
 [project.optional-dependencies]

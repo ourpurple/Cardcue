@@ -18,7 +18,9 @@ class TestDatabaseRule : ExternalResource() {
 
     override fun before() {
         app = ApplicationProvider.getApplicationContext()
-        db = Room.databaseBuilder(app, CardCueDatabase::class.java, name).build()
+        db = Room.databaseBuilder(app, CardCueDatabase::class.java, name)
+            .addMigrations(CardCueDatabase.MIGRATION_1_2)
+            .build()
         app.testDatabase = db
         runBlocking { repository.seedIfNeeded() }
     }

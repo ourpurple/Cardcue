@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.test.runner.AndroidJUnitRunner
 import com.cardcue.app.CardCueApplication
+import com.cardcue.app.data.BillRepository
 import com.cardcue.app.data.CardCueDatabase
 
 class CardCueTestRunner : AndroidJUnitRunner() {
@@ -24,4 +25,6 @@ class TestCardCueApplication : CardCueApplication() {
     // Fail closed: no instrumentation test can fall back to cardcue.db.
     override val database: CardCueDatabase
         get() = checkNotNull(testDatabase) { "Install an isolated test database before launching an Activity" }
+    override val repository: BillRepository
+        get() = BillRepository(database, null)
 }

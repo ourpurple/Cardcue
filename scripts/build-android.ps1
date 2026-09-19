@@ -1,7 +1,7 @@
 param(
     [string]$JavaHome,
     [string]$AndroidHome,
-    [switch]$UseMirror,
+    [switch]$UseMirror = $true,
     [switch]$NoDaemon,
     [switch]$DeviceTests
 )
@@ -12,12 +12,19 @@ $androidProject = Join-Path $projectRoot 'android'
 if ($JavaHome) { $env:JAVA_HOME = (Resolve-Path -LiteralPath $JavaHome).Path }
 if ($AndroidHome) { $env:ANDROID_HOME = (Resolve-Path -LiteralPath $AndroidHome).Path }
 if (-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin\java.exe'))) {
-    throw 'Set JAVA_HOME to JDK 17, or pass -JavaHome.'
+    $fallbackJdk = 'C:\Users\Duolly\Documents\Codex\2026-09-16\wo\work\toolchain\jdk\jdk-17.0.20.1+1'
+    if (Test-Path -LiteralPath (Join-Path $fallbackJdk 'bin\java.exe')) {
+        $env:JAVA_HOME = $fallbackJdk
+    } else {
+        throw 'Set JAVA_HOME to JDK 17, or pass -JavaHome.'
+    }
 }
 if (-not $env:ANDROID_HOME -and $env:ANDROID_SDK_ROOT) { $env:ANDROID_HOME = $env:ANDROID_SDK_ROOT }
 if (-not $env:ANDROID_HOME) {
     $defaultSdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
     if (Test-Path -LiteralPath $defaultSdk) { $env:ANDROID_HOME = $defaultSdk }
+    $fallbackSdk = 'C:\Users\Duolly\Documents\Codex\2026-09-16\wo\work\toolchain\sdk'
+    if (-not $env:ANDROID_HOME -and (Test-Path -LiteralPath $fallbackSdk)) { $env:ANDROID_HOME = $fallbackSdk }
 }
 if (-not $env:ANDROID_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:ANDROID_HOME 'platforms\android-35\android.jar'))) {
     throw 'Install Android SDK Platform 35 and Build Tools 34.0.0, then set ANDROID_HOME.'
@@ -59,3 +66,4 @@ try {
     }
     Write-Host "APK: $(Join-Path $androidProject 'app\build\outputs\apk\debug\app-debug.apk')"
 } finally { Pop-Location }
+

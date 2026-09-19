@@ -3,6 +3,8 @@
 Payments use SELECT ... FOR UPDATE to prevent concurrent overpayment.
 Request UUID provides idempotency – a duplicate request_id returns the
 existing payment instead of creating a second one.
+
+Write operations record immutable audit entries in ChangeLog in the same transaction.
 """
 
 import uuid
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cardcue_api.persistence.models import (
     Account, Card, Statement, StatementVersion, Payment,
 )
+from cardcue_api.persistence.changelog import ChangeLog
 from cardcue_api.domain.schemas import (
     AccountCreate, AccountUpdate, CardCreate,
     StatementCreate, PaymentCreate,
@@ -31,6 +34,24 @@ class ConflictError(Exception):
 class BillingService:
     """Stateless service – receives a session per call."""
 
+    async def _log_change(
+        self,
+        session: AsyncSession,
+        entity_type: str,
+        entity_id: uuid.UUID,
+        action: str,
+        snapshot: dict | None = None,
+    ) -> ChangeLog:
+        entry = ChangeLog(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            action=action,
+            snapshot=snapshot,
+        )
+        session.add(entry)
+        await session.flush()
+        return entry
+
     # ---- Account ----
 
     async def create_account(self, session: AsyncSession, data: AccountCreate) -> Account:
@@ -38,6 +59,13 @@ class BillingService:
         session.add(acct)
         await session.flush()
         await session.refresh(acct)
+        await self._log_change(session, "account", acct.id, "create", {
+            "id": str(acct.id),
+            "bank": acct.bank,
+            "alias": acct.alias,
+            "reference": acct.reference,
+            "status": acct.status,
+        })
         return acct
 
     async def get_account(self, session: AsyncSession, account_id: uuid.UUID) -> Account:
@@ -58,6 +86,13 @@ class BillingService:
             acct.status = data.status
         await session.flush()
         await session.refresh(acct)
+        await self._log_change(session, "account", acct.id, "update", {
+            "id": str(acct.id),
+            "bank": acct.bank,
+            "alias": acct.alias,
+            "reference": acct.reference,
+            "status": acct.status,
+        })
         return acct
 
     # ---- Card ----
@@ -68,6 +103,13 @@ class BillingService:
         session.add(card)
         await session.flush()
         await session.refresh(card)
+        await self._log_change(session, "card", card.id, "create", {
+            "id": str(card.id),
+            "account_id": str(card.account_id),
+            "display_name": card.display_name,
+            "tail": card.tail,
+            "status": card.status,
+        })
         return card
 
     async def list_cards(self, session: AsyncSession, account_id: uuid.UUID) -> list[Card]:
@@ -105,6 +147,17 @@ class BillingService:
         await session.flush()
         await session.refresh(stmt)
         await session.refresh(ver)
+        await self._log_change(session, "statement", stmt.id, "create", {
+            "id": str(stmt.id),
+            "account_id": str(stmt.account_id),
+            "currency": stmt.currency,
+            "statement_date": stmt.statement_date.isoformat(),
+            "due_date": stmt.due_date.isoformat(),
+            "amount_minor": ver.amount_minor,
+            "minimum_minor": ver.minimum_minor,
+            "version_number": ver.version_number,
+            "current_version_id": str(ver.id),
+        })
         return stmt
 
     async def get_statement(self, session: AsyncSession, statement_id: uuid.UUID) -> Statement:
@@ -191,6 +244,14 @@ class BillingService:
         session.add(payment)
         await session.flush()
         await session.refresh(payment)
+        await self._log_change(session, "payment", payment.id, "create", {
+            "id": str(payment.id),
+            "statement_id": str(payment.statement_id),
+            "amount_minor": payment.amount_minor,
+            "currency": payment.currency,
+            "note": payment.note,
+            "recorded_at": payment.recorded_at.isoformat() if payment.recorded_at else None,
+        })
         return payment, True
 
     async def revoke_payment(
@@ -207,6 +268,16 @@ class BillingService:
         payment.revoke_reason = reason
         await session.flush()
         await session.refresh(payment)
+        await self._log_change(session, "payment", payment.id, "revoke", {
+            "id": str(payment.id),
+            "statement_id": str(payment.statement_id),
+            "amount_minor": payment.amount_minor,
+            "currency": payment.currency,
+            "note": payment.note,
+            "recorded_at": payment.recorded_at.isoformat() if payment.recorded_at else None,
+            "revoked_at": payment.revoked_at.isoformat() if payment.revoked_at else None,
+            "revoke_reason": payment.revoke_reason,
+        })
         return payment
 
     async def list_payments(self, session: AsyncSession, statement_id: uuid.UUID) -> list[Payment]:

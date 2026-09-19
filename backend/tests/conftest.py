@@ -8,8 +8,9 @@ import pytest
 from cardcue_api.persistence.database import engine
 
 
-@pytest.fixture(autouse=True, scope="session")
-async def _dispose_engine():
-    """Dispose the async engine after all tests finish."""
+@pytest.fixture(autouse=True, scope="function")
+async def _clear_pool():
+    """Dispose stale connections before each test to avoid asyncpg conflicts."""
+    await engine.dispose()
     yield
     await engine.dispose()
