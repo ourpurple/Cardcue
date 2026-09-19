@@ -1,0 +1,42 @@
+services:
+  cardcue-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cardcue-api
+    restart: unless-stopped
+    command: >
+      sh -c "alembic upgrade head && uvicorn cardcue_api.main:app --host 0.0.0.0 --port 8000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - cardcue-mail-storage:/app/data/mail_storage
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  cardcue-scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cardcue-scheduler
+    restart: unless-stopped
+    command: python -m cardcue_api.jobs.scheduler
+    env_file:
+      - ./backend/.env
+    volumes:
+      - cardcue-mail-storage:/app/data/mail_storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      cardcue-api:
+        condition: service_healthy
+
+volumes:
+  cardcue-mail-storage:

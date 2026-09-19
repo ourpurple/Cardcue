@@ -1,0 +1,16 @@
+[Unit]
+Description=CardCue FastAPI Web Service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cardcue/backend
+EnvironmentFile=/opt/cardcue/backend/.env
+ExecStart=/opt/cardcue/backend/.venv/bin/uvicorn cardcue_api.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
