@@ -43,6 +43,10 @@ export const statementsApi = {
     apiClient.post(`/admin/statements/${id}/payments`, data),
   revokePayment: (paymentId: string, reason: string) =>
     apiClient.post(`/admin/payments/${paymentId}/revoke`, { reason }),
+  deleteStatement: (id: string) =>
+    apiClient.delete(`/admin/statements/${id}`),
+  deletePayment: (paymentId: string) =>
+    apiClient.delete(`/admin/payments/${paymentId}`),
 };
 
 // 5. Emails API

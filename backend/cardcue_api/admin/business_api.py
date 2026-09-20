@@ -800,6 +800,108 @@ async def revoke_payment(
     }
 
 
+@router.delete("/statements/{statement_id}")
+async def delete_statement(
+    statement_id: uuid.UUID,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    stmt = (await session.execute(
+        select(Statement)
+        .where(Statement.id == statement_id)
+        .options(
+            selectinload(Statement.versions),
+            selectinload(Statement.payments),
+        )
+        .with_for_update()
+    )).scalar_one_or_none()
+    if not stmt:
+        raise HTTPException(404, "账单不存在")
+
+    # 1. 解开 Statement.current_version_id 与 StatementVersion 间的循环外键约束
+    stmt.current_version_id = None
+    await session.flush()
+
+    # 2. 解除草稿关联引用（将关联到该账单版本的草稿重置为待审核，清空 confirmed_version_id）
+    version_ids = [v.id for v in stmt.versions]
+    if version_ids:
+        await session.execute(
+            update(StatementDraftModel)
+            .where(StatementDraftModel.confirmed_version_id.in_(version_ids))
+            .values(confirmed_version_id=None, status="pending_review")
+        )
+
+    # 3. 级联清理名下还款流水记录，记录移动端同步 change_log
+    for p in stmt.payments:
+        await billing_svc._log_change(session, "payment", p.id, "delete", {
+            "id": str(p.id),
+            "statement_id": str(p.statement_id),
+            "amount_minor": p.amount_minor,
+            "currency": p.currency,
+        })
+        await session.delete(p)
+
+    # 4. 级联清理名下的不可变版本记录，记录移动端同步 change_log
+    for v in stmt.versions:
+        await billing_svc._log_change(session, "statement_version", v.id, "delete", {
+            "id": str(v.id),
+            "statement_id": str(v.statement_id),
+            "version_number": v.version_number,
+            "amount_minor": v.amount_minor,
+        })
+        await session.delete(v)
+
+    # 5. 记录账单删除同步日志与管理员安全审计事件
+    await billing_svc._log_change(session, "statement", stmt.id, "delete", {
+        "id": str(stmt.id),
+        "account_id": str(stmt.account_id),
+        "currency": stmt.currency,
+        "statement_date": str(stmt.statement_date),
+        "due_date": str(stmt.due_date),
+    })
+    await audit(session, actor, "statement_deleted", str(stmt.id), {
+        "account_id": str(stmt.account_id),
+        "currency": stmt.currency,
+        "statement_date": str(stmt.statement_date),
+        "versions_count": len(stmt.versions),
+        "payments_count": len(stmt.payments),
+    })
+
+    # 6. 删除账单实体并提交事务
+    await session.delete(stmt)
+    await session.commit()
+    return {"success": True, "message": "账单及其关联版本与还款记录已成功删除"}
+
+
+@router.delete("/payments/{payment_id}")
+async def delete_payment(
+    payment_id: uuid.UUID,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    payment = (await session.execute(
+        select(Payment).where(Payment.id == payment_id).with_for_update()
+    )).scalar_one_or_none()
+    if not payment:
+        raise HTTPException(404, "还款记录不存在")
+
+    stmt_id = payment.statement_id
+    await billing_svc._log_change(session, "payment", payment.id, "delete", {
+        "id": str(payment.id),
+        "statement_id": str(stmt_id),
+        "amount_minor": payment.amount_minor,
+        "currency": payment.currency,
+    })
+    await audit(session, actor, "payment_deleted", str(payment.id), {
+        "statement_id": str(stmt_id),
+        "amount_minor": payment.amount_minor,
+        "currency": payment.currency,
+    })
+    await session.delete(payment)
+    await session.commit()
+    return {"success": True, "message": "还款记录已成功删除"}
+
+
 # ---------------------------------------------------------------------------
 # 4. Email Center
 # ---------------------------------------------------------------------------

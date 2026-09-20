@@ -237,6 +237,33 @@ export const Statements: React.FC = () => {
     }
   };
 
+  const handleDeleteStatement = async (id: string) => {
+    try {
+      await statementsApi.deleteStatement(id);
+      message.success('账单已成功删除');
+      fetchStatements();
+      if (currentDetail && currentDetail.id === id) {
+        setDetailVisible(false);
+        setCurrentDetail(null);
+      }
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '删除账单失败');
+    }
+  };
+
+  const handleDeletePayment = async (paymentId: string) => {
+    try {
+      await statementsApi.deletePayment(paymentId);
+      message.success('还款记录已成功删除');
+      fetchStatements();
+      if (currentDetail) {
+        loadDetail(currentDetail.id);
+      }
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '删除还款记录失败');
+    }
+  };
+
   const columns = [
     {
       title: '银行与账户',
@@ -324,7 +351,7 @@ export const Statements: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 240,
+      width: 260,
       render: (_: any, record: StatementListItem) => (
         <Space size="small">
           <Button type="link" size="small" onClick={() => loadDetail(record.id)}>
@@ -338,6 +365,22 @@ export const Statements: React.FC = () => {
           <Button size="small" onClick={() => openCorrectModal(record)}>
             更正
           </Button>
+          <Popconfirm
+            title="确定彻底删除该账单吗？"
+            description={
+              record.total_paid_minor > 0
+                ? '该账单包含已有还款记录，删除将一并清理还款流水及关联版本，操作不可恢复！'
+                : '将删除该账单及关联的所有版本记录，操作不可恢复。'
+            }
+            onConfirm={() => handleDeleteStatement(record.id)}
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+          >
+            <Button danger size="small">
+              删除
+            </Button>
+          </Popconfirm>
         </Space>
       ),
     },
@@ -439,6 +482,18 @@ export const Statements: React.FC = () => {
               <Button size="small" onClick={() => openCorrectModal(currentDetail)}>
                 更正版本
               </Button>
+              <Popconfirm
+                title="确定彻底删除该账单吗？"
+                description="将删除该账单及关联的所有版本和还款流水，操作不可恢复。"
+                onConfirm={() => handleDeleteStatement(currentDetail.id)}
+                okText="删除"
+                okButtonProps={{ danger: true }}
+                cancelText="取消"
+              >
+                <Button danger size="small">
+                  删除账单
+                </Button>
+              </Popconfirm>
             </Space>
           )
         }
@@ -545,21 +600,36 @@ export const Statements: React.FC = () => {
                   },
                   {
                     title: '操作',
-                    render: (_, r) =>
-                      !r.revoked_at && (
-                        <Button
-                          type="link"
-                          danger
-                          size="small"
-                          onClick={() => {
-                            setRevokePaymentId(r.id);
-                            setRevokeReason('');
-                            setRevokeModalVisible(true);
-                          }}
+                    render: (_, r) => (
+                      <Space size="small">
+                        {!r.revoked_at && (
+                          <Button
+                            type="link"
+                            danger
+                            size="small"
+                            onClick={() => {
+                              setRevokePaymentId(r.id);
+                              setRevokeReason('');
+                              setRevokeModalVisible(true);
+                            }}
+                          >
+                            撤销还款
+                          </Button>
+                        )}
+                        <Popconfirm
+                          title="确定删除此还款流水？"
+                          description="删除后账单剩余应还金额将重新计算，操作不可恢复。"
+                          onConfirm={() => handleDeletePayment(r.id)}
+                          okText="删除"
+                          okButtonProps={{ danger: true }}
+                          cancelText="取消"
                         >
-                          撤销还款
-                        </Button>
-                      ),
+                          <Button type="link" danger size="small">
+                            删除
+                          </Button>
+                        </Popconfirm>
+                      </Space>
+                    ),
                   },
                 ]}
               />
