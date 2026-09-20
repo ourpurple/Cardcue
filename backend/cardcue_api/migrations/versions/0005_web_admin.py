@@ -1,34 +1,160 @@
 """Web administration, non-destructive upgrade from 0004."""
 from alembic import op
-import sqlalchemy as sa
+
 revision = "0005"
 down_revision = "0004"
 branch_labels = None
 depends_on = None
 
-def upgrade():
-    op.execute('\nCREATE TABLE admin_jobs (\n\tid UUID NOT NULL, \n\tkind VARCHAR(30) NOT NULL, \n\ttarget_id UUID NOT NULL, \n\tpayload JSON NOT NULL, \n\tstatus VARCHAR(30) NOT NULL, \n\tattempts INTEGER NOT NULL, \n\tcancel_requested BOOLEAN NOT NULL, \n\tlease_owner VARCHAR(64), \n\tlease_until TIMESTAMP WITH TIME ZONE, \n\tresult JSON, \n\terror_code VARCHAR(100), \n\tavailable_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tstarted_at TIMESTAMP WITH TIME ZONE, \n\tfinished_at TIMESTAMP WITH TIME ZONE, \n\tPRIMARY KEY (id)\n)\n\n')
-    op.execute('CREATE INDEX ix_admin_jobs_status ON admin_jobs (status)')
-    op.execute('\nCREATE TABLE admin_users (\n\tid UUID NOT NULL, \n\tusername VARCHAR(100) NOT NULL, \n\tpassword_hash TEXT NOT NULL, \n\tactive BOOLEAN NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tUNIQUE (username)\n)\n\n')
-    op.execute('\nCREATE TABLE audit_events (\n\tid UUID NOT NULL, \n\tactor VARCHAR(100) NOT NULL, \n\taction VARCHAR(80) NOT NULL, \n\ttarget VARCHAR(100), \n\tdetail JSON NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id)\n)\n\n')
-    op.execute('\nCREATE TABLE command_receipts (\n\tid UUID NOT NULL, \n\tfingerprint VARCHAR(64) NOT NULL, \n\tresult JSON NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id)\n)\n\n')
-    op.execute('\nCREATE TABLE login_guards (\n\tkey VARCHAR(64) NOT NULL, \n\tattempts INTEGER NOT NULL, \n\treset_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tPRIMARY KEY (key)\n)\n\n')
-    op.execute('\nCREATE TABLE model_profiles (\n\tid UUID NOT NULL, \n\tname VARCHAR(100) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id)\n)\n\n')
-    op.execute('\nCREATE TABLE pairing_codes (\n\tcode_hash VARCHAR(64) NOT NULL, \n\texpires_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tused_at TIMESTAMP WITH TIME ZONE, \n\tPRIMARY KEY (code_hash)\n)\n\n')
-    op.execute('\nCREATE TABLE runtime_settings (\n\tkey VARCHAR(50) NOT NULL, \n\tvalue JSON NOT NULL, \n\tPRIMARY KEY (key)\n)\n\n')
-    op.execute('\nCREATE TABLE model_revisions (\n\tid UUID NOT NULL, \n\tprofile_id UUID NOT NULL, \n\tnumber INTEGER NOT NULL, \n\tparameters JSON NOT NULL, \n\tencrypted_key TEXT NOT NULL, \n\ttested_at TIMESTAMP WITH TIME ZONE, \n\ttest_error VARCHAR(100), \n\trevoked BOOLEAN NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_model_revision UNIQUE (profile_id, number), \n\tFOREIGN KEY(profile_id) REFERENCES model_profiles (id)\n)\n\n')
-    op.execute('\nCREATE TABLE web_sessions (\n\ttoken_hash VARCHAR(64) NOT NULL, \n\tadmin_id UUID NOT NULL, \n\tcsrf_token VARCHAR(100) NOT NULL, \n\texpires_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tverified_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tPRIMARY KEY (token_hash), \n\tFOREIGN KEY(admin_id) REFERENCES admin_users (id)\n)\n\n')
-    op.execute('\nCREATE TABLE model_calls (\n\tid UUID NOT NULL, \n\trevision_id UUID NOT NULL, \n\tstatus VARCHAR(30) NOT NULL, \n\tusage JSON, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tFOREIGN KEY(revision_id) REFERENCES model_revisions (id)\n)\n\n')
-    op.add_column("accounts", sa.Column("revision", sa.Integer(), nullable=False, server_default="1"))
-    op.add_column("cards", sa.Column("revision", sa.Integer(), nullable=False, server_default="1"))
-    op.add_column("statement_drafts", sa.Column("revision", sa.Integer(), nullable=False, server_default="1"))
-    op.add_column("mailboxes", sa.Column("settings_json", sa.JSON(), nullable=False, server_default='{}'))
-    op.add_column("mailboxes", sa.Column("revision", sa.Integer(), nullable=False, server_default='1'))
-    op.add_column("mailboxes", sa.Column("tested_revision", sa.Integer(), nullable=True))
-    op.add_column("mailboxes", sa.Column("pending_config", sa.JSON(), nullable=True))
-    op.add_column("mailboxes", sa.Column("pending_token", sa.Text(), nullable=True))
-    op.add_column("mailboxes", sa.Column("last_attempt_at", sa.DateTime(timezone=True), nullable=True))
-    op.execute("INSERT INTO runtime_settings (key, value) VALUES ('model', '{}')")
 
-def downgrade():
+def upgrade() -> None:
+    # 1. Create tables and indices if they do not exist
+    op.execute("""
+CREATE TABLE IF NOT EXISTS admin_jobs (
+    id UUID NOT NULL, 
+    kind VARCHAR(30) NOT NULL, 
+    target_id UUID NOT NULL, 
+    payload JSON NOT NULL, 
+    status VARCHAR(30) NOT NULL, 
+    attempts INTEGER NOT NULL, 
+    cancel_requested BOOLEAN NOT NULL, 
+    lease_owner VARCHAR(64), 
+    lease_until TIMESTAMP WITH TIME ZONE, 
+    result JSON, 
+    error_code VARCHAR(100), 
+    available_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    started_at TIMESTAMP WITH TIME ZONE, 
+    finished_at TIMESTAMP WITH TIME ZONE, 
+    PRIMARY KEY (id)
+)
+""")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_admin_jobs_status ON admin_jobs (status)")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS admin_users (
+    id UUID NOT NULL, 
+    username VARCHAR(100) NOT NULL, 
+    password_hash TEXT NOT NULL, 
+    active BOOLEAN NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    UNIQUE (username)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS audit_events (
+    id UUID NOT NULL, 
+    actor VARCHAR(100) NOT NULL, 
+    action VARCHAR(80) NOT NULL, 
+    target VARCHAR(100), 
+    detail JSON NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS command_receipts (
+    id UUID NOT NULL, 
+    fingerprint VARCHAR(64) NOT NULL, 
+    result JSON NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS login_guards (
+    key VARCHAR(64) NOT NULL, 
+    attempts INTEGER NOT NULL, 
+    reset_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (key)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS model_profiles (
+    id UUID NOT NULL, 
+    name VARCHAR(100) NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS pairing_codes (
+    code_hash VARCHAR(64) NOT NULL, 
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    used_at TIMESTAMP WITH TIME ZONE, 
+    PRIMARY KEY (code_hash)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    key VARCHAR(50) NOT NULL, 
+    value JSON NOT NULL, 
+    PRIMARY KEY (key)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS model_revisions (
+    id UUID NOT NULL, 
+    profile_id UUID NOT NULL, 
+    number INTEGER NOT NULL, 
+    parameters JSON NOT NULL, 
+    encrypted_key TEXT NOT NULL, 
+    tested_at TIMESTAMP WITH TIME ZONE, 
+    test_error VARCHAR(100), 
+    revoked BOOLEAN NOT NULL, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    CONSTRAINT uq_model_revision UNIQUE (profile_id, number), 
+    FOREIGN KEY(profile_id) REFERENCES model_profiles (id)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS web_sessions (
+    token_hash VARCHAR(64) NOT NULL, 
+    admin_id UUID NOT NULL, 
+    csrf_token VARCHAR(100) NOT NULL, 
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    verified_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+    PRIMARY KEY (token_hash), 
+    FOREIGN KEY(admin_id) REFERENCES admin_users (id)
+)
+""")
+
+    op.execute("""
+CREATE TABLE IF NOT EXISTS model_calls (
+    id UUID NOT NULL, 
+    revision_id UUID NOT NULL, 
+    status VARCHAR(30) NOT NULL, 
+    usage JSON, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(revision_id) REFERENCES model_revisions (id)
+)
+""")
+
+    # 2. Add columns if not exist
+    op.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1")
+    op.execute("ALTER TABLE cards ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1")
+    op.execute("ALTER TABLE statement_drafts ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1")
+    op.execute("ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS settings_json JSON NOT NULL DEFAULT '{}'")
+    op.execute("ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1")
+    op.execute("ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS tested_revision INTEGER")
+    op.execute("ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS pending_config JSON")
+    op.execute("ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS pending_token TEXT")
+    op.execute("ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMP WITH TIME ZONE")
+
+    # 3. Insert default settings idempotently
+    op.execute("INSERT INTO runtime_settings (key, value) VALUES ('model', '{}') ON CONFLICT (key) DO NOTHING")
+
+
+def downgrade() -> None:
     raise RuntimeError("Destructive downgrade refused. Restore a verified backup using the documented recovery procedure.")

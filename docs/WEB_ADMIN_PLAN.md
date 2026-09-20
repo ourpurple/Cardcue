@@ -604,3 +604,8 @@ docker compose exec api python -m cardcue_api.admin.cli create-admin --username 
 4. **初始化管理员**：`docker compose exec api python -m cardcue_api.admin.cli create-admin --username admin`（交互式输入管理员密码）。
 
 登录 `https://cardcue.yourdomain.com` 即可进入 CardCue 管理后台！
+
+
+### 9.2 外部 PostgreSQL 数据库接入与幂等迁移保障
+1. **外部数据库适配**：系统已解耦内部 `db` 容器（设为 `profiles: ["local-db"]`），默认直连外部现存 PostgreSQL 实例（如 `152.70.238.24:5432/cardcube`）。
+2. **完全幂等迁移机制**：针对已有历史表结构的外部数据库，Alembic 迁移脚本 `0005_web_admin.py` 已全面改造为完全幂等（`CREATE TABLE IF NOT EXISTS`、`CREATE INDEX IF NOT EXISTS`、`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`、`INSERT ... ON CONFLICT DO NOTHING`），确保无论外部数据库之前是否已存在部分管理表或字段，均能平滑通过版本推进至 0005，绝不造成容器启动崩溃或破坏现有业务数据。
