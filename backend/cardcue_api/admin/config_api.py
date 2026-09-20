@@ -63,13 +63,34 @@ async def update_mailbox(identifier: uuid.UUID, data: MailConfig, actor=Depends(
     revision_check(row, data.expected_revision)
     # Changing mailbox identity must be a separate mailbox, never silently reuse old UID cursors.
     old = row.settings_json or {}
-    if data.email_address != row.email_address or data.imap_host != row.imap_host or data.folder != old.get("folder", "INBOX") or data.username != old.get("username", ""):
+    old_user = (old.get("username") or row.email_address or "").strip()
+    new_user = (data.username or data.email_address or "").strip()
+    old_folder = (old.get("folder") or "INBOX").strip()
+    new_folder = (data.folder or "INBOX").strip()
+    old_host = (row.imap_host or "").strip()
+    new_host = (data.imap_host or "").strip()
+    old_email = (row.email_address or "").strip()
+    new_email = (data.email_address or "").strip()
+
+    if new_email != old_email or new_host != old_host or new_folder != old_folder or new_user != old_user:
         raise HTTPException(409, "邮箱身份、服务器或文件夹变化请新建配置；旧邮箱可停用，历史保留")
+
     row.pending_config = data.model_dump(exclude={"auth_token", "expected_revision"})
     if data.auth_token:
         row.pending_token = encrypt_token(data.auth_token)
+        row.tested_revision = None
+    else:
+        # Secret didn't change: if the previous revision was tested, keep it tested
+        if row.tested_revision is not None:
+            row.tested_revision = row.revision + 1
+        # If already active and only metadata (e.g. name, check interval) changed:
+        if row.is_active:
+            row.settings_json = {**(row.settings_json or {}), **row.pending_config, "active_revision": row.revision + 1}
+            row.check_interval_minutes = data.check_interval_minutes
+            row.pending_config = None
+            row.pending_token = None
+
     row.revision += 1
-    row.tested_revision = None
     await audit(session, actor, "mailbox_configuration_staged", row.id, {"revision": row.revision, "secret_changed": bool(data.auth_token)})
     return mailbox_public(row)
 

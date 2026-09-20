@@ -180,3 +180,76 @@ async def test_model_profile_deletion_flow(admin_client: AsyncClient):
     # 6. Second deletion returns 404
     r_del_again = await admin_client.delete(f"/v1/admin/models/{profile_id}")
     assert r_del_again.status_code == 404
+
+async def test_mailbox_update_flow(admin_client: AsyncClient):
+    suffix = uuid.uuid4().hex[:6]
+    test_email = f"update_test_{suffix}@sina.com"
+
+    # 1. Create mailbox with empty username
+    r_create = await admin_client.post("/v1/admin/mailboxes", json={
+        "name": "未命名邮箱",
+        "email_address": test_email,
+        "username": "",
+        "imap_host": "imap.sina.com",
+        "imap_port": 993,
+        "use_ssl": True,
+        "auth_token": "secret_token_123",
+        "folder": "INBOX",
+        "check_interval_minutes": 30,
+    })
+    assert r_create.status_code == 201, r_create.text
+    mailbox_data = r_create.json()
+    mailbox_id = uuid.UUID(mailbox_data["id"])
+    rev = mailbox_data["revision"]
+
+    # 2. Update alias name to "hhh邮箱", username is blank
+    r_update = await admin_client.put(f"/v1/admin/mailboxes/{mailbox_id}", json={
+        "expected_revision": rev,
+        "name": "hhh邮箱",
+        "email_address": test_email,
+        "username": "",
+        "imap_host": "imap.sina.com",
+        "imap_port": 993,
+        "use_ssl": True,
+        "folder": "INBOX",
+        "check_interval_minutes": 45,
+    })
+    assert r_update.status_code == 200, r_update.text
+    updated_data = r_update.json()
+    assert updated_data["name"] == "hhh邮箱"
+    rev = updated_data["revision"]
+
+    # 3. Update alias again with username matching email address
+    r_update2 = await admin_client.put(f"/v1/admin/mailboxes/{mailbox_id}", json={
+        "expected_revision": rev,
+        "name": "hhh新名称",
+        "email_address": test_email,
+        "username": test_email,
+        "imap_host": "imap.sina.com",
+        "imap_port": 993,
+        "use_ssl": True,
+        "folder": "INBOX",
+        "check_interval_minutes": 45,
+    })
+    assert r_update2.status_code == 200, r_update2.text
+    assert r_update2.json()["name"] == "hhh新名称"
+    rev = r_update2.json()["revision"]
+
+    # 4. Attempt to change email address to another account -> must raise 409
+    r_update_fail = await admin_client.put(f"/v1/admin/mailboxes/{mailbox_id}", json={
+        "expected_revision": rev,
+        "name": "试图换邮箱",
+        "email_address": "different_account@sina.com",
+        "username": "",
+        "imap_host": "imap.sina.com",
+        "imap_port": 993,
+        "use_ssl": True,
+        "folder": "INBOX",
+        "check_interval_minutes": 45,
+    })
+    assert r_update_fail.status_code == 409
+    assert "邮箱身份、服务器或文件夹变化请新建配置" in r_update_fail.json()["detail"]
+
+    # Clean up
+    await admin_client.delete(f"/v1/admin/mailboxes/{mailbox_id}")
+

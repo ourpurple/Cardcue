@@ -28,6 +28,7 @@ import {
   StopOutlined,
   EditOutlined,
   DeleteOutlined,
+  CheckOutlined,
 } from '@ant-design/icons';
 import { mailboxApi, jobsApi } from '../api';
 import { MailboxItem } from '../types';
@@ -122,7 +123,7 @@ export const MailboxConfig: React.FC = () => {
       const payload: any = {
         name: values.name,
         email_address: values.email_address,
-        username: values.username || values.email_address,
+        username: values.username || '',
         imap_host: values.imap_host,
         imap_port: values.imap_port,
         use_ssl: values.use_ssl,
@@ -300,7 +301,18 @@ export const MailboxConfig: React.FC = () => {
             >
               测试连接
             </Button>
-            {mb.is_active ? (
+            {mb.has_pending ? (
+              <Button
+                size="small"
+                type="primary"
+                icon={<CheckOutlined />}
+                disabled={!isTested}
+                onClick={() => handleEnable(mb)}
+                loading={loadingThis}
+              >
+                应用生效
+              </Button>
+            ) : mb.is_active ? (
               <Popconfirm
                 title="确定停用该邮箱吗？"
                 description="停用后定时任务将不再自动拉取该邮箱的邮件"
@@ -417,12 +429,17 @@ export const MailboxConfig: React.FC = () => {
               { required: true, message: '请输入邮箱地址' },
               { type: 'email', message: '请输入合法有效的邮箱格式' },
             ]}
+            extra={editingMailbox ? '邮箱地址已绑定历史拉取游标，如需更换邮箱请新建配置或删除后重建' : undefined}
           >
-            <Input placeholder="username@sina.com" />
+            <Input placeholder="username@sina.com" disabled={!!editingMailbox} />
           </Form.Item>
 
-          <Form.Item name="username" label="IMAP 登录账号 (留空默认等同于邮箱地址)">
-            <Input placeholder="留空默认使用邮箱地址" />
+          <Form.Item
+            name="username"
+            label="IMAP 登录账号 (留空默认等同于邮箱地址)"
+            extra={editingMailbox ? '登录账号与邮箱绑定，不可在此修改' : undefined}
+          >
+            <Input placeholder="留空默认使用邮箱地址" disabled={!!editingMailbox} />
           </Form.Item>
 
           <Form.Item
@@ -446,7 +463,7 @@ export const MailboxConfig: React.FC = () => {
               rules={[{ required: true, message: '请输入 IMAP 主机' }]}
               style={{ flex: 2 }}
             >
-              <Input placeholder="imap.sina.com" />
+              <Input placeholder="imap.sina.com" disabled={!!editingMailbox} />
             </Form.Item>
             <Form.Item
               name="imap_port"
@@ -474,7 +491,7 @@ export const MailboxConfig: React.FC = () => {
               <InputNumber min={1} max={3650} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item name="folder" label="邮箱文件夹" style={{ flex: 1 }}>
-              <Input placeholder="INBOX" />
+              <Input placeholder="INBOX" disabled={!!editingMailbox} />
             </Form.Item>
           </Space>
         </Form>
