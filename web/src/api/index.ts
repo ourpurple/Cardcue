@@ -23,12 +23,14 @@ export const accountsApi = {
   listAccounts: () => apiClient.get('/admin/accounts'),
   createAccount: (data: any) => apiClient.post('/admin/accounts', data),
   updateAccount: (id: string, data: any) => apiClient.put(`/admin/accounts/${id}`, data),
+  deleteAccount: (id: string) => apiClient.delete(`/admin/accounts/${id}`),
   listCards: (accountId?: string) =>
     accountId
       ? apiClient.get(`/admin/accounts/${accountId}/cards`)
       : apiClient.get('/admin/cards'),
   createCard: (data: any) => apiClient.post('/admin/cards', data),
   updateCard: (id: string, data: any) => apiClient.put(`/admin/cards/${id}`, data),
+  deleteCard: (id: string) => apiClient.delete(`/admin/cards/${id}`),
 };
 
 // 4. Statements & Payments API

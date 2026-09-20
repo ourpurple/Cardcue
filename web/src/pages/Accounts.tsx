@@ -21,6 +21,7 @@ import {
   StopOutlined,
   CheckCircleOutlined,
   ReloadOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons';
 import { accountsApi } from '../api';
 import { BankAccount, AccountCard } from '../types';
@@ -134,6 +135,27 @@ export const Accounts: React.FC = () => {
       message.error(err?.response?.data?.detail || '修改账户状态失败');
     }
   };
+
+  const handleDeleteAccount = async (record: BankAccount) => {
+    try {
+      await accountsApi.deleteAccount(record.id);
+      message.success(`账户「${record.alias || record.bank || record.account_name}」已彻底删除`);
+      fetchAccounts();
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '删除账户失败');
+    }
+  };
+
+  const handleDeleteCard = async (card: AccountCard) => {
+    try {
+      await accountsApi.deleteCard(card.id);
+      message.success(`卡片「${card.display_name || card.card_alias || '尾号 ' + (card.tail || card.card_last4)}」已彻底删除`);
+      fetchAccounts();
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '删除卡片失败');
+    }
+  };
+
 
   // Card Add Handlers
   const openAddCard = (accountId: string) => {
@@ -261,7 +283,7 @@ export const Accounts: React.FC = () => {
                   title="确定停用该卡片吗？停用后仍保留历史账单"
                   onConfirm={() => handleToggleCardStatus(card, 'archived')}
                 >
-                  <Button type="link" size="small" danger icon={<StopOutlined />}>
+                  <Button type="link" size="small" icon={<StopOutlined />}>
                     停用
                   </Button>
                 </Popconfirm>
@@ -275,6 +297,18 @@ export const Accounts: React.FC = () => {
                   </Button>
                 </Popconfirm>
               )}
+              <Popconfirm
+                title="确定删除此信用卡吗？"
+                description="彻底删除后不可恢复。"
+                onConfirm={() => handleDeleteCard(card)}
+                okText="删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+              >
+                <Button type="link" size="small" danger icon={<DeleteOutlined />}>
+                  删除
+                </Button>
+              </Popconfirm>
             </Space>
           );
         },
@@ -368,10 +402,10 @@ export const Accounts: React.FC = () => {
           </Button>
           {r.status === 'active' ? (
             <Popconfirm
-              title="确定归档此账户吗？归档不会删除关联的历史账单。"
+              title="确定归档此账户吗？归档后不会参与新邮件匹配，但保留历史账单。"
               onConfirm={() => handleToggleAccountStatus(r, 'archived')}
             >
-              <Button size="small" danger>
+              <Button size="small">
                 归档
               </Button>
             </Popconfirm>
@@ -385,6 +419,22 @@ export const Accounts: React.FC = () => {
               </Button>
             </Popconfirm>
           )}
+          <Popconfirm
+            title="确定彻底删除此银行账户吗？"
+            description={
+              (r.cards?.length || 0) > 0
+                ? `将连同名下 ${r.cards?.length} 张信用卡一并彻底删除。若已有正式账单将无法删除。`
+                : '彻底删除后不可恢复。若已有正式账单将无法删除。'
+            }
+            onConfirm={() => handleDeleteAccount(r)}
+            okText="彻底删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+          >
+            <Button size="small" danger icon={<DeleteOutlined />}>
+              删除
+            </Button>
+          </Popconfirm>
         </Space>
       ),
     },

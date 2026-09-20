@@ -22,7 +22,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -286,6 +286,67 @@ async def update_account(
         "updated_at": acct.updated_at,
     }
 
+@router.delete("/accounts/{account_id}")
+async def delete_account(
+    account_id: uuid.UUID,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    acct = (await session.execute(
+        select(Account).where(Account.id == account_id).with_for_update()
+    )).scalar_one_or_none()
+    if not acct:
+        raise HTTPException(404, "账户不存在")
+
+    stmt_count = (await session.execute(
+        select(func.count()).select_from(Statement).where(Statement.account_id == account_id)
+    )).scalar_one()
+    if stmt_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"该账户下已存在 {stmt_count} 笔正式账单或还款流水。为保障财务数据完整性，无法直接删除。如不再使用请使用【归档】功能隐藏该账户；若确需彻底删除，请先在账单管理中清理名下账单。"
+        )
+
+    await session.execute(
+        update(StatementDraftModel)
+        .where(StatementDraftModel.matched_account_id == account_id)
+        .values(matched_account_id=None, matched_card_id=None)
+    )
+
+    cards = list((await session.execute(
+        select(Card).where(Card.account_id == account_id)
+    )).scalars().all())
+    for card in cards:
+        await session.execute(
+            update(StatementDraftModel)
+            .where(StatementDraftModel.matched_card_id == card.id)
+            .values(matched_card_id=None)
+        )
+        await billing_svc._log_change(session, "card", card.id, "delete", {
+            "id": str(card.id),
+            "account_id": str(card.account_id),
+            "tail": card.tail,
+            "display_name": card.display_name,
+        })
+        await session.delete(card)
+
+    await billing_svc._log_change(session, "account", acct.id, "delete", {
+        "id": str(acct.id),
+        "bank": acct.bank,
+        "alias": acct.alias,
+        "reference": acct.reference,
+    })
+    await audit(session, actor, "account_deleted", str(acct.id), {
+        "bank": acct.bank,
+        "alias": acct.alias,
+        "deleted_cards_count": len(cards),
+    })
+
+    await session.delete(acct)
+    await session.commit()
+    return {"success": True, "message": "账户及其名下卡片已成功删除"}
+
+
 
 @router.get("/accounts/{account_id}/cards")
 async def list_account_cards(account_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
@@ -389,6 +450,40 @@ async def update_card(
         "status": card.status,
         "revision": card.revision,
     }
+
+@router.delete("/cards/{card_id}")
+async def delete_card(
+    card_id: uuid.UUID,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    card = (await session.execute(
+        select(Card).where(Card.id == card_id).with_for_update()
+    )).scalar_one_or_none()
+    if not card:
+        raise HTTPException(404, "卡片不存在")
+
+    await session.execute(
+        update(StatementDraftModel)
+        .where(StatementDraftModel.matched_card_id == card_id)
+        .values(matched_card_id=None)
+    )
+
+    await billing_svc._log_change(session, "card", card.id, "delete", {
+        "id": str(card.id),
+        "account_id": str(card.account_id),
+        "tail": card.tail,
+        "display_name": card.display_name,
+    })
+    await audit(session, actor, "card_deleted", str(card.id), {
+        "account_id": str(card.account_id),
+        "tail": card.tail,
+    })
+
+    await session.delete(card)
+    await session.commit()
+    return {"success": True, "message": "信用卡已成功删除"}
+
 
 
 # ---------------------------------------------------------------------------
