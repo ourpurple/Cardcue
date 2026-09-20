@@ -26,6 +26,13 @@ from cardcue_api.config import settings
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings.validate_production()
+    try:
+        from cardcue_api.persistence.database import async_session_factory
+        from cardcue_api.admin.config_api import ensure_default_model_from_env
+        async with async_session_factory() as session:
+            await ensure_default_model_from_env(session)
+    except Exception:
+        pass
     yield
 
 

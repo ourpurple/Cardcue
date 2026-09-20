@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 import shutil
 from sqlalchemy import delete, select, update
+from cardcue_api.config import settings
 from cardcue_api.admin.models import AdminJob, ModelCall, ModelProfile, ModelRevision, RuntimeSettings
 from cardcue_api.admin.schemas import MailConfig, ModelConfig, ModelTest, RevisionRequest
 from cardcue_api.admin.security import audit, now, recent_admin, require_admin
@@ -205,6 +206,67 @@ async def delete_mailbox(identifier: uuid.UUID, actor=Depends(require_admin), se
     await audit(session, actor, "mailbox_deleted", str(identifier), {"email_address": email_addr})
     return {"ok": True, "id": str(identifier)}
 
+async def ensure_default_model_from_env(session) -> ModelProfile | None:
+    """Ensure that if LLM credentials exist in .env and no model profile exists,
+    a default profile is automatically seeded and activated.
+    Also ensures an active revision is set in RuntimeSettings if missing."""
+    if not settings.llm_api_key or not settings.llm_base_url or not settings.llm_model:
+        return None
+
+    existing = (await session.execute(select(ModelProfile.id).limit(1))).first()
+    if not existing:
+        profile = ModelProfile(name="默认模型 (.env)")
+        session.add(profile)
+        await session.flush()
+
+        params = {
+            "base_url": settings.llm_base_url,
+            "model": settings.llm_model,
+            "temperature": 0.0,
+            "max_tokens": 4096,
+            "timeout_seconds": 45,
+            "max_retries": 1,
+            "input_limit": 24000,
+            "json_mode": True,
+            "daily_limit": 500,
+        }
+        rev = ModelRevision(
+            profile_id=profile.id,
+            number=1,
+            parameters=params,
+            encrypted_key=encrypt_token(settings.llm_api_key),
+            tested_at=now(),
+            test_error=None,
+            revoked=False,
+        )
+        session.add(rev)
+        await session.flush()
+
+        state = await session.get(RuntimeSettings, "model")
+        if not state:
+            session.add(RuntimeSettings(key="model", value={"revision_id": str(rev.id)}))
+        else:
+            state.value = {"revision_id": str(rev.id)}
+
+        await session.commit()
+        return profile
+    else:
+        state = await session.get(RuntimeSettings, "model")
+        if not state or not state.value or not state.value.get("revision_id"):
+            latest_rev = (await session.execute(
+                select(ModelRevision)
+                .where(ModelRevision.revoked == False)
+                .order_by(ModelRevision.created_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+            if latest_rev:
+                if not state:
+                    session.add(RuntimeSettings(key="model", value={"revision_id": str(latest_rev.id)}))
+                else:
+                    state.value = {"revision_id": str(latest_rev.id)}
+                await session.commit()
+        return None
+
 async def model_public(session, profile):
     revisions = list((await session.execute(select(ModelRevision).where(ModelRevision.profile_id == profile.id).order_by(ModelRevision.number.desc()))).scalars())
     state = await session.get(RuntimeSettings, "model")
@@ -216,6 +278,7 @@ async def model_public(session, profile):
 
 @router.get("/models")
 async def models(session=Depends(get_session)):
+    await ensure_default_model_from_env(session)
     rows = (await session.execute(select(ModelProfile).order_by(ModelProfile.created_at.desc()))).scalars()
     return [await model_public(session, row) for row in rows]
 

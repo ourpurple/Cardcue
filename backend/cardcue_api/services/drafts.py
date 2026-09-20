@@ -134,6 +134,17 @@ class DraftService:
 
         # 4. Extract statement using model extractor (LLM if configured, rule fallback otherwise)
         if text_to_extract:
+            if self.model_extractor.revision is None:
+                try:
+                    from cardcue_api.admin.models import ModelRevision, RuntimeSettings
+                    state = await session.get(RuntimeSettings, "model")
+                    if state and state.value and state.value.get("revision_id"):
+                        active_rev = await session.get(ModelRevision, uuid.UUID(state.value["revision_id"]))
+                        if active_rev and not active_rev.revoked:
+                            self.model_extractor.revision = active_rev
+                except Exception:
+                    pass
+
             extracted_draft, extractor_name = await self.model_extractor.extract(
                 text=text_to_extract,
                 subject=source.subject or "",

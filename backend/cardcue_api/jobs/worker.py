@@ -46,7 +46,19 @@ async def run_job(identifier):
                         await enqueue(s, JobCreate(kind="parse", target_id=source.id, allow_external=True), "worker")
                     await s.commit()
             else:
-                revision = await s.get(ModelRevision, uuid.UUID(payload["model_revision_id"])) if payload.get("model_revision_id") else None
+                revision = None
+                if payload.get("model_revision_id"):
+                    try:
+                        revision = await s.get(ModelRevision, uuid.UUID(payload["model_revision_id"]))
+                    except Exception:
+                        revision = None
+                if not revision:
+                    state = await s.get(RuntimeSettings, "model")
+                    if state and state.value and state.value.get("revision_id"):
+                        try:
+                            revision = await s.get(ModelRevision, uuid.UUID(state.value["revision_id"]))
+                        except Exception:
+                            revision = None
                 service = DraftService()
                 service.model_extractor = ManagedExtractor(revision, force=payload.get("force", False))
                 draft = await service.parse_email_source(s, target_id)
