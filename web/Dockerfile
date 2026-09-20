@@ -7,6 +7,7 @@ COPY package*.json ./
 RUN npm ci
 
 COPY . .
+RUN chmod -R +x node_modules/.bin || true
 RUN npm run build
 
 # Production stage
