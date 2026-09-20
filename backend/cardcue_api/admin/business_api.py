@@ -37,8 +37,10 @@ from cardcue_api.admin.models import (
 from cardcue_api.admin.jobs import enqueue
 from cardcue_api.admin.schemas import (
     AccountEdit,
+    BatchDeleteDraftsRequest,
     BatchParseRequest,
     CardEdit,
+    ClearDraftsRequest,
     DraftEdit,
     JobCreate,
     SourceAction,
@@ -1360,6 +1362,107 @@ async def reject_draft(
     await audit(session, actor, "draft_rejected", str(draft_id), {"reason": req.reason})
     await session.commit()
     return {"draft_id": str(draft.id), "status": draft.status}
+
+
+@router.delete("/drafts/{draft_id}")
+async def delete_draft(
+    draft_id: uuid.UUID,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    draft = await session.get(StatementDraftModel, draft_id)
+    if not draft:
+        raise HTTPException(404, "草稿不存在")
+
+    email_source_id = draft.email_source_id
+    bank = draft.bank
+    status = draft.status
+
+    await session.delete(draft)
+    await session.flush()
+
+    if email_source_id:
+        remaining = (await session.execute(
+            select(func.count()).select_from(StatementDraftModel).where(
+                StatementDraftModel.email_source_id == email_source_id
+            )
+        )).scalar_one()
+        if remaining == 0:
+            source = await session.get(EmailSource, email_source_id)
+            if source and source.parse_status == "parsed":
+                source.parse_status = "pending"
+
+    await audit(session, actor, "draft_deleted", str(draft_id), {"bank": bank, "status": status})
+    await session.commit()
+    return {"ok": True, "deleted_id": str(draft_id)}
+
+
+@router.post("/drafts/batch-delete")
+async def batch_delete_drafts(
+    data: BatchDeleteDraftsRequest,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    if not data.draft_ids:
+        return {"deleted_count": 0}
+
+    drafts = list((await session.execute(
+        select(StatementDraftModel).where(StatementDraftModel.id.in_(data.draft_ids))
+    )).scalars().all())
+
+    email_source_ids = {d.email_source_id for d in drafts if d.email_source_id}
+    for d in drafts:
+        await session.delete(d)
+
+    await session.flush()
+
+    for es_id in email_source_ids:
+        remaining = (await session.execute(
+            select(func.count()).select_from(StatementDraftModel).where(
+                StatementDraftModel.email_source_id == es_id
+            )
+        )).scalar_one()
+        if remaining == 0:
+            source = await session.get(EmailSource, es_id)
+            if source and source.parse_status == "parsed":
+                source.parse_status = "pending"
+
+    await audit(session, actor, "draft_batch_deleted", None, {"count": len(drafts)})
+    await session.commit()
+    return {"deleted_count": len(drafts)}
+
+
+@router.post("/drafts/clear")
+async def clear_drafts(
+    data: ClearDraftsRequest,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(StatementDraftModel)
+    if data.status and data.status != "all":
+        query = query.where(StatementDraftModel.status == data.status)
+
+    drafts = list((await session.execute(query)).scalars().all())
+    email_source_ids = {d.email_source_id for d in drafts if d.email_source_id}
+    for d in drafts:
+        await session.delete(d)
+
+    await session.flush()
+
+    for es_id in email_source_ids:
+        remaining = (await session.execute(
+            select(func.count()).select_from(StatementDraftModel).where(
+                StatementDraftModel.email_source_id == es_id
+            )
+        )).scalar_one()
+        if remaining == 0:
+            source = await session.get(EmailSource, es_id)
+            if source and source.parse_status == "parsed":
+                source.parse_status = "pending"
+
+    await audit(session, actor, "drafts_cleared", None, {"count": len(drafts), "status": data.status})
+    await session.commit()
+    return {"deleted_count": len(drafts)}
 
 
 # ---------------------------------------------------------------------------

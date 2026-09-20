@@ -103,6 +103,12 @@ export const draftsApi = {
     apiClient.post(`/admin/drafts/${id}/confirm`, data),
   rejectDraft: (id: string, reason: string) =>
     apiClient.post(`/admin/drafts/${id}/reject`, { reason }),
+  deleteDraft: (id: string) =>
+    apiClient.delete(`/admin/drafts/${id}`),
+  batchDeleteDrafts: (draftIds: string[]) =>
+    apiClient.post<{ deleted_count: number }>('/admin/drafts/batch-delete', { draft_ids: draftIds }),
+  clearDrafts: (data?: { status?: string }) =>
+    apiClient.post<{ deleted_count: number }>('/admin/drafts/clear', data || {}),
 };
 
 // 9. Jobs API

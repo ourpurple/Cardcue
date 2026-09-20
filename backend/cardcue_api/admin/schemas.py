@@ -106,3 +106,8 @@ class BatchParseRequest(Strict):
     mailbox_id: uuid.UUID | None = None
     email_ids: list[uuid.UUID] | None = None
     include_failed: bool = False
+class BatchDeleteDraftsRequest(Strict):
+    draft_ids: list[uuid.UUID]
+
+class ClearDraftsRequest(Strict):
+    status: str | None = None

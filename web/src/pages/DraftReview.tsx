@@ -17,6 +17,7 @@ import {
   Alert,
   Divider,
   Descriptions,
+  Popconfirm,
 } from 'antd';
 import {
   AuditOutlined,
@@ -25,6 +26,8 @@ import {
   SaveOutlined,
   ExclamationCircleOutlined,
   FileTextOutlined,
+  DeleteOutlined,
+  ClearOutlined,
 } from '@ant-design/icons';
 import { draftsApi, accountsApi } from '../api';
 import { CurrencyAmount, centsToYuanString, yuanStringToCents } from '../components/CurrencyAmount';
@@ -51,6 +54,11 @@ export const DraftReview: React.FC = () => {
   const [pageSize, setPageSize] = useState(10);
   const [statusFilter, setStatusFilter] = useState<string>('pending_review');
 
+  // Multi-select & Batch / Clear state
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [clearLoading, setClearLoading] = useState(false);
+
   // Review Drawer state
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [drawerLoading, setDrawerLoading] = useState(false);
@@ -63,6 +71,13 @@ export const DraftReview: React.FC = () => {
   // Reject modal
   const [rejectModalVisible, setRejectModalVisible] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
+
+  const statusLabelMap: Record<string, string> = {
+    pending_review: '待人工审核',
+    confirmed: '已确认入账',
+    rejected: '已驳回',
+    all: '全部状态',
+  };
 
   const fetchDrafts = async () => {
     setLoading(true);
@@ -83,6 +98,56 @@ export const DraftReview: React.FC = () => {
   useEffect(() => {
     fetchDrafts();
   }, [page, pageSize, statusFilter]);
+
+  const handleDeleteDraft = async (draftId: string) => {
+    try {
+      await draftsApi.deleteDraft(draftId);
+      message.success('草稿已删除');
+      setSelectedRowKeys((prev) => prev.filter((k) => k !== draftId));
+      fetchDrafts();
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || '删除草稿失败';
+      message.error(msg);
+    }
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedRowKeys.length === 0) return;
+    setBatchDeleting(true);
+    try {
+      const res = await draftsApi.batchDeleteDrafts(selectedRowKeys as string[]);
+      const deletedCount = res.data?.deleted_count ?? selectedRowKeys.length;
+      message.success(`已成功删除 ${deletedCount} 个草稿`);
+      setSelectedRowKeys([]);
+      fetchDrafts();
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || '批量删除草稿失败';
+      message.error(msg);
+    } finally {
+      setBatchDeleting(false);
+    }
+  };
+
+  const handleClearDrafts = async () => {
+    setClearLoading(true);
+    try {
+      const res = await draftsApi.clearDrafts({ status: statusFilter });
+      const count = res.data?.deleted_count ?? 0;
+      message.success(count > 0 ? `已成功清空 ${count} 个草稿` : '当前无可清空的草稿');
+      setSelectedRowKeys([]);
+      fetchDrafts();
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || '一键清空草稿失败';
+      message.error(msg);
+    } finally {
+      setClearLoading(false);
+    }
+  };
+
+  const rowSelection = {
+    selectedRowKeys,
+    onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
+  };
 
   const openReviewDrawer = async (draftId: string) => {
     setDrawerLoading(true);
@@ -158,11 +223,11 @@ export const DraftReview: React.FC = () => {
     try {
       const values = await form.validateFields();
       if (!values.account_id) {
-        message.error('入账前必须选择归属银行账户');
+        message.error('请在确认前选择归属银行账户');
         return;
       }
       if (!values.statement_date || !values.due_date) {
-        message.error('账单日与到期还款日不可为空');
+        message.error('账单日与到期还款日不能为空');
         return;
       }
       const amountMinor = yuanStringToCents(values.amount_yuan);
@@ -186,7 +251,7 @@ export const DraftReview: React.FC = () => {
         due_date: values.due_date,
       });
 
-      message.success('草稿审核通过，正式账单已生成入账');
+      message.success('草稿已通过并生成正式账单与待还款项');
       setDrawerVisible(false);
       fetchDrafts();
     } catch (_) {
@@ -291,15 +356,29 @@ export const DraftReview: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 140,
+      width: 180,
       render: (_: any, record: StatementDraftItem) => (
-        <Button
-          type={record.status === 'pending_review' ? 'primary' : 'default'}
-          size="small"
-          onClick={() => openReviewDrawer(record.id)}
-        >
-          {record.status === 'pending_review' ? '审核入账' : '查看详情'}
-        </Button>
+        <Space size="small">
+          <Button
+            type={record.status === 'pending_review' ? 'primary' : 'default'}
+            size="small"
+            onClick={() => openReviewDrawer(record.id)}
+          >
+            {record.status === 'pending_review' ? '审核入账' : '查看详情'}
+          </Button>
+          <Popconfirm
+            title="确定删除此账单草稿吗？"
+            description="删除后草稿将被清除，关联邮件将恢复待解析。"
+            onConfirm={() => handleDeleteDraft(record.id)}
+            okText="确定删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+          >
+            <Button type="link" danger size="small" icon={<DeleteOutlined />}>
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
       ),
     },
   ];
@@ -320,6 +399,7 @@ export const DraftReview: React.FC = () => {
               value={statusFilter}
               onChange={(v) => {
                 setStatusFilter(v);
+                setSelectedRowKeys([]);
                 setPage(1);
               }}
               options={[
@@ -330,10 +410,58 @@ export const DraftReview: React.FC = () => {
               ]}
             />
             <Button onClick={fetchDrafts}>刷新</Button>
+            <Popconfirm
+              title={`确定一键清空${statusFilter === 'all' ? '所有' : `所有【${statusLabelMap[statusFilter] || statusFilter}】`}账单草稿吗？`}
+              description="清空后所有符合条件的草稿将被永久删除，关联邮件将恢复待解析。正式入账账单不受影响。此操作不可恢复！"
+              onConfirm={handleClearDrafts}
+              okText="确定清空"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+            >
+              <Button danger icon={<ClearOutlined />} loading={clearLoading}>
+                一键清空
+              </Button>
+            </Popconfirm>
           </Space>
         }
       >
+        {selectedRowKeys.length > 0 && (
+          <div
+            style={{
+              marginBottom: 12,
+              padding: '8px 16px',
+              background: '#fff1f0',
+              border: '1px solid #ffa39e',
+              borderRadius: 6,
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <span>
+              已选择 <Text strong style={{ color: '#cf1322' }}>{selectedRowKeys.length}</Text> 个草稿
+            </span>
+            <Space>
+              <Button size="small" onClick={() => setSelectedRowKeys([])}>
+                取消勾选
+              </Button>
+              <Popconfirm
+                title={`确定批量删除选中的 ${selectedRowKeys.length} 个草稿吗？`}
+                description="删除后草稿将被清除，关联邮件将恢复待解析。"
+                onConfirm={handleBatchDelete}
+                okText="确定删除"
+                okButtonProps={{ danger: true }}
+                cancelText="取消"
+              >
+                <Button size="small" type="primary" danger icon={<DeleteOutlined />} loading={batchDeleting}>
+                  批量删除选中项
+                </Button>
+              </Popconfirm>
+            </Space>
+          </div>
+        )}
         <Table
+          rowSelection={rowSelection}
           rowKey="id"
           columns={columns}
           dataSource={drafts}
@@ -351,9 +479,9 @@ export const DraftReview: React.FC = () => {
         />
       </Card>
 
-      {/* 审核双栏证据比对与人工编辑抽屉 */}
+      {/* 证据核对与人工审核抽屉 */}
       <Drawer
-        title="草稿证据核对与人工入账"
+        title="草稿证据核对与人工审核"
         placement="right"
         width={960}
         open={drawerVisible}
@@ -362,28 +490,46 @@ export const DraftReview: React.FC = () => {
           setCurrentDraft(null);
         }}
         extra={
-          currentDraft &&
-          currentDraft.status === 'pending_review' && (
+          currentDraft && (
             <Space>
-              <Button
-                danger
-                icon={<CloseOutlined />}
-                onClick={() => setRejectModalVisible(true)}
-                loading={actionLoading}
+              <Popconfirm
+                title="确定删除此账单草稿吗？"
+                description="删除后草稿将被清除，关联邮件将恢复待解析。"
+                onConfirm={async () => {
+                  await handleDeleteDraft(currentDraft.id);
+                  setDrawerVisible(false);
+                }}
+                okText="确定删除"
+                okButtonProps={{ danger: true }}
+                cancelText="取消"
               >
-                驳回草稿
-              </Button>
-              <Button icon={<SaveOutlined />} onClick={handleSaveDraft} loading={actionLoading}>
-                暂存修改
-              </Button>
-              <Button
-                type="primary"
-                icon={<CheckOutlined />}
-                onClick={handleConfirmDraft}
-                loading={actionLoading}
-              >
-                确认入账
-              </Button>
+                <Button danger icon={<DeleteOutlined />}>
+                  删除草稿
+                </Button>
+              </Popconfirm>
+              {currentDraft.status === 'pending_review' && (
+                <>
+                  <Button
+                    danger
+                    icon={<CloseOutlined />}
+                    onClick={() => setRejectModalVisible(true)}
+                    loading={actionLoading}
+                  >
+                    驳回草稿
+                  </Button>
+                  <Button icon={<SaveOutlined />} onClick={handleSaveDraft} loading={actionLoading}>
+                    暂存修改
+                  </Button>
+                  <Button
+                    type="primary"
+                    icon={<CheckOutlined />}
+                    onClick={handleConfirmDraft}
+                    loading={actionLoading}
+                  >
+                    确认入账
+                  </Button>
+                </>
+              )}
             </Space>
           )
         }
@@ -419,18 +565,18 @@ export const DraftReview: React.FC = () => {
               <Alert
                 type="error"
                 showIcon
-                message="该草稿已被驳回拒绝"
+                message="该草稿已被人工拒绝"
                 description={currentDraft.rejection_reason || '无驳回原因'}
                 style={{ marginBottom: 16 }}
               />
             )}
 
             <Row gutter={24}>
-              {/* 左侧：模型提取证据链与邮件原文 */}
+              {/* 左侧：模型提取证据与源邮件原文 */}
               <Col span={12} style={{ borderRight: '1px solid #f0f0f0', paddingRight: 20 }}>
                 <Title level={5}>
                   <FileTextOutlined style={{ marginRight: 6 }} />
-                  提取依据与证据片段
+                  提取上下文与证据片段
                 </Title>
 
                 {currentDraft.source_email && (
@@ -441,14 +587,14 @@ export const DraftReview: React.FC = () => {
                     <Descriptions.Item label="发件人">
                       {currentDraft.source_email.sender}
                     </Descriptions.Item>
-                    <Descriptions.Item label="收信时间">
+                    <Descriptions.Item label="邮件时间">
                       {new Date(currentDraft.source_email.email_date).toLocaleString()}
                     </Descriptions.Item>
                   </Descriptions>
                 )}
 
                 <div style={{ marginBottom: 16 }}>
-                  <Text type="secondary">解析器架构: </Text>
+                  <Text type="secondary">解析处理器: </Text>
                   <Tag color="geekblue">{currentDraft.extractor_name}</Tag>
                   <Text type="secondary" style={{ marginLeft: 12 }}>
                     版本 Revision: #{currentDraft.revision}
@@ -456,7 +602,7 @@ export const DraftReview: React.FC = () => {
                 </div>
 
                 <Divider orientation="left" style={{ margin: '12px 0' }}>
-                  模型与规则定位的证据片段
+                  模型高置信度证据片段
                 </Divider>
 
                 {currentDraft.evidence && currentDraft.evidence.length > 0 ? (
@@ -505,7 +651,7 @@ export const DraftReview: React.FC = () => {
               <Col span={12} style={{ paddingLeft: 20 }}>
                 <Title level={5}>
                   <AuditOutlined style={{ marginRight: 6 }} />
-                  正式账单入账参数
+                  正式账单核对表单
                 </Title>
 
                 <Form
@@ -519,7 +665,7 @@ export const DraftReview: React.FC = () => {
                     rules={[{ required: true, message: '请选择归属银行账户' }]}
                   >
                     <Select
-                      placeholder="请选择银行账户"
+                      placeholder="请选择归属银行账户"
                       onChange={handleAccountChange}
                       options={(currentDraft.candidate_accounts || []).map((a) => ({
                         label: a.alias ? `${a.bank} (${a.alias})` : a.bank,
