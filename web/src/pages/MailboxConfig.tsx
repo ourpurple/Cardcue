@@ -64,6 +64,7 @@ export const MailboxConfig: React.FC = () => {
     form.resetFields();
     // Default to Sina preset
     applyPreset('sina');
+    form.setFieldsValue({ auto_parse: true });
     setModalVisible(true);
   };
 
@@ -83,6 +84,7 @@ export const MailboxConfig: React.FC = () => {
       since_days: mb.since_days || 90,
       max_messages: mb.max_messages || 100,
       max_attachment_mb: mb.max_attachment_mb || 10,
+      auto_parse: mb.auto_parse ?? false,
     });
     setModalVisible(true);
   };
@@ -100,6 +102,7 @@ export const MailboxConfig: React.FC = () => {
         since_days: 90,
         max_messages: 100,
         max_attachment_mb: 10,
+        auto_parse: true,
       });
     } else {
       form.setFieldsValue({
@@ -111,6 +114,7 @@ export const MailboxConfig: React.FC = () => {
         since_days: 90,
         max_messages: 100,
         max_attachment_mb: 10,
+        auto_parse: false,
       });
     }
   };
@@ -132,6 +136,7 @@ export const MailboxConfig: React.FC = () => {
         since_days: values.since_days,
         max_messages: values.max_messages,
         max_attachment_mb: values.max_attachment_mb,
+        auto_parse: !!values.auto_parse,
       };
 
       if (values.auth_token) {
@@ -273,6 +278,18 @@ export const MailboxConfig: React.FC = () => {
         }
         return <Tag color="orange">未通过测试</Tag>;
       },
+    },
+    {
+      title: '自动解析',
+      key: 'auto_parse',
+      width: 120,
+      render: (_: any, mb: MailboxItem) => (
+        mb.auto_parse ? (
+          <Tag color="cyan">全自动解析</Tag>
+        ) : (
+          <Tag color="default">手动触发</Tag>
+        )
+      ),
     },
     {
       title: '最近拉取时间',
@@ -494,6 +511,18 @@ export const MailboxConfig: React.FC = () => {
               <Input placeholder="INBOX" disabled={!!editingMailbox} />
             </Form.Item>
           </Space>
+
+          <Divider orientation="left" style={{ margin: '16px 0' }}>
+            智能解析与自动化
+          </Divider>
+          <Form.Item
+            name="auto_parse"
+            label="自动解析新账单"
+            valuePropName="checked"
+            extra="开启后，邮箱每次拉取到疑似信用卡账单的新邮件时，将自动创建解析任务调用大模型提取账单并生成草稿。"
+          >
+            <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+          </Form.Item>
         </Form>
       </Modal>
     </div>

@@ -55,11 +55,16 @@ async def run_job(identifier):
             job.status, job.result, job.finished_at = status, result, now()
             job.lease_until = None
             await s.commit()
-        except Exception:
+        except Exception as exc:
             await s.rollback()
             job = await s.get(AdminJob, identifier, populate_existing=True)
             job.status, job.error_code, job.finished_at = "failed", "processing_failed_or_outcome_unknown", now()
             job.lease_until = None
+            if kind == "parse":
+                source = await s.get(EmailSource, target_id)
+                if source:
+                    source.parse_status = "failed"
+                    source.error_message = str(exc)[:500]
             await s.commit()
 
 async def main():

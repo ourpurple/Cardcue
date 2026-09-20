@@ -34,10 +34,13 @@ from cardcue_api.admin.models import (
     ModelRevision,
     RuntimeSettings,
 )
+from cardcue_api.admin.jobs import enqueue
 from cardcue_api.admin.schemas import (
     AccountEdit,
+    BatchParseRequest,
     CardEdit,
     DraftEdit,
+    JobCreate,
     SourceAction,
     StatementCorrection,
 )
@@ -1064,6 +1067,39 @@ async def action_email(
     await audit(session, actor, f"email_{data.action}", str(es.id))
     await session.commit()
     return {"id": str(es.id), "parse_status": es.parse_status}
+
+
+@router.post("/emails/batch-parse")
+async def batch_parse_emails(
+    data: BatchParseRequest,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(EmailSource).where(
+        EmailSource.raw_storage_path.isnot(None),
+        EmailSource.parse_status.notin_(["ignored", "duplicate"]),
+    )
+    if data.email_ids:
+        query = query.where(EmailSource.id.in_(data.email_ids))
+    else:
+        statuses = ["pending", "failed"] if data.include_failed else ["pending"]
+        query = query.where(EmailSource.parse_status.in_(statuses))
+        if data.mailbox_id:
+            query = query.where(EmailSource.mailbox_id == data.mailbox_id)
+        query = query.where(EmailSource.is_statement_candidate.is_(True))
+
+    sources = list((await session.execute(query)).scalars().all())
+    enqueued_count = 0
+    for s in sources:
+        try:
+            await enqueue(session, JobCreate(kind="parse", target_id=s.id, allow_external=True), actor=actor)
+            enqueued_count += 1
+        except Exception:
+            pass
+
+    await session.commit()
+    await audit(session, actor, "email_batch_parse_enqueued", None, {"count": enqueued_count})
+    return {"enqueued": enqueued_count, "total_found": len(sources)}
 
 
 @router.get("/attachments/{attachment_id}/download")

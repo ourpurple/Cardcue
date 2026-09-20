@@ -55,6 +55,8 @@ export const emailsApi = {
   getEmail: (id: string) => apiClient.get(`/admin/emails/${id}`),
   actionEmail: (id: string, action: 'ignore' | 'restore') =>
     apiClient.post(`/admin/emails/${id}/action`, { action }),
+  batchParse: (data?: { mailbox_id?: string; email_ids?: string[]; include_failed?: boolean }) =>
+    apiClient.post<{ enqueued: number; total_found: number }>('/admin/emails/batch-parse', data || {}),
   getAttachmentDownloadUrl: (attId: string) =>
     `/v1/admin/attachments/${attId}/download`,
 };

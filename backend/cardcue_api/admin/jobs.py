@@ -33,6 +33,9 @@ async def enqueue(session, data: JobCreate, actor="scheduler"):
         if revision_id and not data.allow_external:
             raise HTTPException(409, "需明确同意将邮件内容发送到配置的模型服务")
         payload["model_revision_id"] = revision_id
+        if target.parse_status == "failed":
+            target.parse_status = "pending"
+            target.error_message = None
     job = AdminJob(kind=data.kind, target_id=data.target_id, payload=payload)
     session.add(job)
     await session.flush()
