@@ -7,41 +7,56 @@ import {
   Modal,
   Form,
   Input,
-  InputNumber,
   Select,
   Popconfirm,
   Typography,
   message,
   Card,
+  Tooltip,
 } from 'antd';
-import { PlusOutlined, CreditCardOutlined, EditOutlined, StopOutlined } from '@ant-design/icons';
+import {
+  PlusOutlined,
+  CreditCardOutlined,
+  EditOutlined,
+  StopOutlined,
+  CheckCircleOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons';
 import { accountsApi } from '../api';
-import { CurrencyAmount, centsToYuanString, yuanStringToCents } from '../components/CurrencyAmount';
+import { BankAccount, AccountCard } from '../types';
 
 const { Text } = Typography;
 
 export const Accounts: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
-  const [accounts, setAccounts] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<BankAccount[]>([]);
 
   // Account Modal
   const [accountModalOpen, setAccountModalOpen] = useState<boolean>(false);
-  const [editingAccount, setEditingAccount] = useState<any>(null);
+  const [editingAccount, setEditingAccount] = useState<BankAccount | null>(null);
   const [accountForm] = Form.useForm();
   const [accountSaving, setAccountSaving] = useState<boolean>(false);
 
-  // Card Modal
+  // Card Add Modal
   const [cardModalOpen, setCardModalOpen] = useState<boolean>(false);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [cardForm] = Form.useForm();
   const [cardSaving, setCardSaving] = useState<boolean>(false);
 
+  // Card Edit Modal
+  const [cardEditModalOpen, setCardEditModalOpen] = useState<boolean>(false);
+  const [editingCard, setEditingCard] = useState<AccountCard | null>(null);
+  const [cardEditForm] = Form.useForm();
+  const [cardEditSaving, setCardEditSaving] = useState<boolean>(false);
+
   const fetchAccounts = async () => {
     try {
       setLoading(true);
       const res = await accountsApi.listAccounts();
-      setAccounts(res.data?.accounts || []);
-    } catch (_) {
+      const list = Array.isArray(res.data) ? res.data : (res.data?.accounts || []);
+      setAccounts(list);
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '获取银行账户列表失败');
     } finally {
       setLoading(false);
     }
@@ -56,23 +71,19 @@ export const Accounts: React.FC = () => {
     setEditingAccount(null);
     accountForm.resetFields();
     accountForm.setFieldsValue({
-      currency: 'CNY',
-      statement_day: 1,
-      payment_due_day_offset: 20,
+      status: 'active',
     });
     setAccountModalOpen(true);
   };
 
-  const openEditAccount = (record: any) => {
+  const openEditAccount = (record: BankAccount) => {
     setEditingAccount(record);
     accountForm.resetFields();
     accountForm.setFieldsValue({
-      bank_name: record.bank_name,
-      account_name: record.account_name,
-      currency: record.currency,
-      credit_limit_yuan: centsToYuanString(record.credit_limit_cents),
-      statement_day: record.statement_day,
-      payment_due_day_offset: record.payment_due_day_offset,
+      bank: record.bank || record.bank_name,
+      alias: record.alias || record.account_name,
+      reference: record.reference,
+      status: record.status || 'active',
     });
     setAccountModalOpen(true);
   };
@@ -81,49 +92,53 @@ export const Accounts: React.FC = () => {
     try {
       const values = await accountForm.validateFields();
       setAccountSaving(true);
-      const payload = {
-        bank_name: values.bank_name.trim(),
-        account_name: values.account_name.trim(),
-        currency: values.currency,
-        credit_limit_cents: yuanStringToCents(values.credit_limit_yuan),
-        statement_day: values.statement_day,
-        payment_due_day_offset: values.payment_due_day_offset,
-      };
 
       if (editingAccount) {
         await accountsApi.updateAccount(editingAccount.id, {
-          ...payload,
+          bank: values.bank?.trim(),
+          alias: values.alias?.trim() || null,
+          reference: values.reference?.trim() || null,
+          status: values.status || editingAccount.status || 'active',
           expected_revision: editingAccount.revision,
         });
         message.success('账户修改成功');
       } else {
-        await accountsApi.createAccount(payload);
-        message.success('账户创建成功');
+        await accountsApi.createAccount({
+          bank: values.bank.trim(),
+          alias: values.alias?.trim() || null,
+          reference: values.reference?.trim() || null,
+        });
+        message.success('账户新建成功');
       }
       setAccountModalOpen(false);
       fetchAccounts();
-    } catch (_) {
+    } catch (err: any) {
+      if (err?.response?.data?.detail) {
+        message.error(err.response.data.detail);
+      }
     } finally {
       setAccountSaving(false);
     }
   };
 
-  const handleArchiveAccount = async (record: any) => {
+  const handleToggleAccountStatus = async (record: BankAccount, nextStatus: 'active' | 'archived') => {
     try {
       await accountsApi.updateAccount(record.id, {
-        status: 'archived',
+        alias: record.alias,
+        status: nextStatus,
         expected_revision: record.revision,
       });
-      message.success('账户已归档');
+      message.success(nextStatus === 'archived' ? '账户已归档' : '账户已恢复');
       fetchAccounts();
-    } catch (_) {}
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '修改账户状态失败');
+    }
   };
 
-  // Card Form Handlers
+  // Card Add Handlers
   const openAddCard = (accountId: string) => {
     setSelectedAccountId(accountId);
     cardForm.resetFields();
-    cardForm.setFieldsValue({ card_type: 'credit' });
     setCardModalOpen(true);
   };
 
@@ -133,90 +148,155 @@ export const Accounts: React.FC = () => {
       setCardSaving(true);
       await accountsApi.createCard({
         account_id: selectedAccountId,
-        card_last4: values.card_last4.trim(),
-        card_alias: values.card_alias?.trim() || '',
-        card_type: values.card_type,
+        tail: values.tail.trim(),
+        display_name: values.display_name?.trim() || null,
       });
-      message.success('卡片添加成功');
+      message.success('信用卡绑定成功');
       setCardModalOpen(false);
       fetchAccounts();
-    } catch (_) {
+    } catch (err: any) {
+      if (err?.response?.data?.detail) {
+        message.error(err.response.data.detail);
+      }
     } finally {
       setCardSaving(false);
     }
   };
 
-  const handleArchiveCard = async (card: any) => {
+  // Card Edit Handlers
+  const openEditCard = (card: AccountCard) => {
+    setEditingCard(card);
+    cardEditForm.resetFields();
+    cardEditForm.setFieldsValue({
+      tail: card.tail || card.card_last4,
+      display_name: card.display_name || card.card_alias,
+      status: card.status || (card.is_active ? 'active' : 'archived'),
+    });
+    setCardEditModalOpen(true);
+  };
+
+  const handleSaveEditCard = async () => {
+    if (!editingCard) return;
+    try {
+      const values = await cardEditForm.validateFields();
+      setCardEditSaving(true);
+      await accountsApi.updateCard(editingCard.id, {
+        tail: values.tail?.trim(),
+        display_name: values.display_name?.trim() || null,
+        status: values.status,
+        expected_revision: editingCard.revision,
+      });
+      message.success('卡片信息已更新');
+      setCardEditModalOpen(false);
+      fetchAccounts();
+    } catch (err: any) {
+      if (err?.response?.data?.detail) {
+        message.error(err.response.data.detail);
+      }
+    } finally {
+      setCardEditSaving(false);
+    }
+  };
+
+  const handleToggleCardStatus = async (card: AccountCard, nextStatus: 'active' | 'archived') => {
     try {
       await accountsApi.updateCard(card.id, {
-        is_active: false,
+        display_name: card.display_name,
+        status: nextStatus,
         expected_revision: card.revision,
       });
-      message.success('卡片已停用');
+      message.success(nextStatus === 'archived' ? '卡片已停用' : '卡片已启用');
       fetchAccounts();
-    } catch (_) {}
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '修改卡片状态失败');
+    }
   };
 
   // Expanded Cards Table
-  const expandedRowRender = (accountRecord: any) => {
+  const expandedRowRender = (accountRecord: BankAccount) => {
     const cards = accountRecord.cards || [];
     const cardColumns = [
       {
         title: '卡号尾号',
-        dataIndex: 'card_last4',
-        key: 'card_last4',
-        render: (text: string) => <Tag color="blue">尾号 {text}</Tag>,
+        key: 'tail',
+        render: (_: any, card: AccountCard) => (
+          <Tag color="cyan" style={{ fontWeight: 'bold' }}>
+            尾号 {card.tail || card.card_last4}
+          </Tag>
+        ),
       },
       {
-        title: '卡片别名 / 备注',
-        dataIndex: 'card_alias',
-        key: 'card_alias',
-        render: (text: string) => text || '-',
-      },
-      {
-        title: '类型',
-        dataIndex: 'card_type',
-        key: 'card_type',
-        render: (type: string) => (type === 'credit' ? '信用卡' : '借记卡'),
+        title: '卡片名称 / 备注',
+        key: 'display_name',
+        render: (_: any, card: AccountCard) => (
+          <Text strong>{card.display_name || card.card_alias || '信用卡'}</Text>
+        ),
       },
       {
         title: '状态',
-        dataIndex: 'is_active',
-        key: 'is_active',
-        render: (active: boolean) =>
-          active ? <Tag color="success">正常</Tag> : <Tag color="default">已停用</Tag>,
+        key: 'status',
+        render: (_: any, card: AccountCard) => {
+          const isActive = card.status === 'active' || card.is_active;
+          return isActive ? <Tag color="success">正常</Tag> : <Tag color="default">已停用</Tag>;
+        },
+      },
+      {
+        title: '绑定时间',
+        dataIndex: 'created_at',
+        key: 'created_at',
+        render: (t: string) => (t ? new Date(t).toLocaleString('zh-CN') : '-'),
       },
       {
         title: '操作',
         key: 'action',
-        render: (_: any, card: any) => (
-          card.is_active ? (
-            <Popconfirm
-              title="确定停用该卡片吗？停用后仍保留历史账单"
-              onConfirm={() => handleArchiveCard(card)}
-            >
-              <Button type="link" size="small" danger icon={<StopOutlined />}>
-                停用
+        render: (_: any, card: AccountCard) => {
+          const isActive = card.status === 'active' || card.is_active;
+          return (
+            <Space>
+              <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditCard(card)}>
+                编辑
               </Button>
-            </Popconfirm>
-          ) : null
-        ),
+              {isActive ? (
+                <Popconfirm
+                  title="确定停用该卡片吗？停用后仍保留历史账单"
+                  onConfirm={() => handleToggleCardStatus(card, 'archived')}
+                >
+                  <Button type="link" size="small" danger icon={<StopOutlined />}>
+                    停用
+                  </Button>
+                </Popconfirm>
+              ) : (
+                <Popconfirm
+                  title="确定重新启用该卡片吗？"
+                  onConfirm={() => handleToggleCardStatus(card, 'active')}
+                >
+                  <Button type="link" size="small" style={{ color: '#52c41a' }} icon={<CheckCircleOutlined />}>
+                    启用
+                  </Button>
+                </Popconfirm>
+              )}
+            </Space>
+          );
+        },
       },
     ];
 
     return (
-      <div style={{ margin: '8px 0 16px 36px', background: '#fafafa', padding: 12, borderRadius: 6 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-          <Text strong style={{ fontSize: 13 }}>
-            名下卡片列表（共 {cards.length} 张）
-          </Text>
+      <div style={{ margin: '8px 0 16px 36px', background: '#fafafa', padding: 14, borderRadius: 8, border: '1px solid #f0f0f0' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <Space>
+            <CreditCardOutlined style={{ color: '#1677ff' }} />
+            <Text strong style={{ fontSize: 13 }}>
+              名下绑定的信用卡（共 {cards.length} 张）
+            </Text>
+          </Space>
           <Button
             size="small"
             type="dashed"
             icon={<PlusOutlined />}
             onClick={() => openAddCard(accountRecord.id)}
           >
-            添加卡片
+            绑定新卡片
           </Button>
         </div>
         <Table
@@ -225,7 +305,7 @@ export const Accounts: React.FC = () => {
           rowKey="id"
           pagination={false}
           size="small"
-          locale={{ emptyText: '该账户下暂无绑定卡片，点击上方添加' }}
+          locale={{ emptyText: '该银行账户下暂无绑定卡片，点击上方「绑定新卡片」添加' }}
         />
       </div>
     );
@@ -233,47 +313,52 @@ export const Accounts: React.FC = () => {
 
   const accountColumns = [
     {
-      title: '账户名称 / 发卡行',
+      title: '账户别名 / 银行',
       key: 'name',
-      render: (_: any, r: any) => (
-        <Space direction="vertical" size={0}>
-          <Text strong>{r.account_name}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{r.bank_name}</Text>
+      render: (_: any, r: BankAccount) => (
+        <Space direction="vertical" size={2}>
+          <Text strong style={{ fontSize: 14 }}>
+            {r.alias || r.bank || r.account_name}
+          </Text>
+          <Space size={8}>
+            <Tag color="blue">{r.bank || r.bank_name}</Tag>
+            {r.reference ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                参考编号: {r.reference}
+              </Text>
+            ) : null}
+          </Space>
         </Space>
       ),
     },
     {
-      title: '币种',
-      dataIndex: 'currency',
-      key: 'currency',
-      render: (c: string) => <Tag color="geekblue">{c}</Tag>,
+      title: '名下卡片',
+      key: 'cards_count',
+      render: (_: any, r: any) => {
+        const count = r.cards ? r.cards.length : (r.cards_count ?? 0);
+        return (
+          <Tag color="geekblue" icon={<CreditCardOutlined />}>
+            {count} 张信用卡
+          </Tag>
+        );
+      },
     },
     {
-      title: '信用额度',
-      key: 'limit',
-      render: (_: any, r: any) => (
-        <CurrencyAmount cents={r.credit_limit_cents} currency={r.currency} />
-      ),
-    },
-    {
-      title: '账单日 / 还款日',
-      key: 'days',
-      render: (_: any, r: any) => (
-        <span>
-          每月 {r.statement_day} 日 / 账单后 {r.payment_due_day_offset} 天
-        </span>
-      ),
-    },
-    {
-      title: '状态',
+      title: '账户状态',
       dataIndex: 'status',
       key: 'status',
-      render: (s: string) => (s === 'active' ? <Tag color="success">正常</Tag> : <Tag>已归档</Tag>),
+      render: (s: string) => (s === 'active' ? <Tag color="success">正常</Tag> : <Tag color="default">已归档</Tag>),
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      render: (t: string) => (t ? new Date(t).toLocaleString('zh-CN') : '-'),
     },
     {
       title: '操作',
       key: 'actions',
-      render: (_: any, r: any) => (
+      render: (_: any, r: BankAccount) => (
         <Space>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEditAccount(r)}>
             编辑
@@ -281,13 +366,22 @@ export const Accounts: React.FC = () => {
           <Button size="small" icon={<PlusOutlined />} onClick={() => openAddCard(r.id)}>
             加卡
           </Button>
-          {r.status === 'active' && (
+          {r.status === 'active' ? (
             <Popconfirm
-              title="确定归档此账户吗？归档不会删除关联的历史账单"
-              onConfirm={() => handleArchiveAccount(r)}
+              title="确定归档此账户吗？归档不会删除关联的历史账单。"
+              onConfirm={() => handleToggleAccountStatus(r, 'archived')}
             >
               <Button size="small" danger>
                 归档
+              </Button>
+            </Popconfirm>
+          ) : (
+            <Popconfirm
+              title="确定恢复此归档账户吗？"
+              onConfirm={() => handleToggleAccountStatus(r, 'active')}
+            >
+              <Button size="small" style={{ color: '#52c41a' }}>
+                恢复
               </Button>
             </Popconfirm>
           )}
@@ -306,9 +400,14 @@ export const Accounts: React.FC = () => {
           </Space>
         }
         extra={
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreateAccount}>
-            新建账户
-          </Button>
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={fetchAccounts} loading={loading}>
+              刷新
+            </Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreateAccount}>
+              新建账户
+            </Button>
+          </Space>
         }
       >
         <Table
@@ -317,11 +416,11 @@ export const Accounts: React.FC = () => {
           rowKey="id"
           loading={loading}
           expandable={{ expandedRowRender }}
-          pagination={{ pageSize: 15 }}
+          pagination={{ pageSize: 15, showTotal: (total) => `共 ${total} 个银行账户` }}
         />
       </Card>
 
-      {/* Account Modal */}
+      {/* Account Modal (Create / Edit) */}
       <Modal
         title={editingAccount ? '编辑银行账户' : '新建银行账户'}
         open={accountModalOpen}
@@ -332,65 +431,43 @@ export const Accounts: React.FC = () => {
       >
         <Form form={accountForm} layout="vertical">
           <Form.Item
-            name="bank_name"
-            label="发卡行名称"
-            rules={[{ required: true, message: '请输入发卡行名称，如：招商银行、工商银行' }]}
+            name="bank"
+            label="发卡银行名称"
+            rules={[{ required: true, message: '请输入发卡行名称，如：招商银行、中国银行、中信银行' }]}
           >
             <Input placeholder="发卡行名称，如：招商银行" />
           </Form.Item>
 
           <Form.Item
-            name="account_name"
-            label="账户名称 / 账本标识"
-            rules={[{ required: true, message: '请输入账户名称' }]}
+            name="alias"
+            label="账户别名 / 账本名称"
+            tooltip="自定义展示名称，如：中信银行信用卡 (张三)、招行经典白信用卡账户"
           >
-            <Input placeholder="如：招行经典白信用卡账户" />
+            <Input placeholder="如：中信银行信用卡 (牛鋆辉)" />
           </Form.Item>
 
           <Form.Item
-            name="currency"
-            label="币种"
-            rules={[{ required: true, message: '请选择币种' }]}
+            name="reference"
+            label="银行参考标识 (可选)"
+            tooltip="银行账单邮件中的账号识别编号或自定义英文编码"
           >
-            <Select>
-              <Select.Option value="CNY">CNY 人民币</Select.Option>
-              <Select.Option value="USD">USD 美元</Select.Option>
-              <Select.Option value="EUR">EUR 欧元</Select.Option>
-              <Select.Option value="HKD">HKD 港币</Select.Option>
-            </Select>
+            <Input placeholder="如：CITIC_001 或 CMB_CLASSIC" />
           </Form.Item>
 
-          <Form.Item
-            name="credit_limit_yuan"
-            label="信用额度（元）"
-            rules={[{ required: true, message: '请输入信用额度' }]}
-          >
-            <Input placeholder="如：50000.00" />
-          </Form.Item>
-
-          <Space style={{ display: 'flex', width: '100%' }}>
-            <Form.Item
-              name="statement_day"
-              label="每月固定账单日"
-              rules={[{ required: true, message: '请输入账单日' }]}
-            >
-              <InputNumber min={1} max={31} style={{ width: 180 }} />
+          {editingAccount ? (
+            <Form.Item name="status" label="账户状态" rules={[{ required: true }]}>
+              <Select>
+                <Select.Option value="active">正常 (active)</Select.Option>
+                <Select.Option value="archived">已归档 (archived)</Select.Option>
+              </Select>
             </Form.Item>
-
-            <Form.Item
-              name="payment_due_day_offset"
-              label="还款日相对账单日天数"
-              rules={[{ required: true, message: '请输入偏移天数' }]}
-            >
-              <InputNumber min={1} max={60} style={{ width: 180 }} />
-            </Form.Item>
-          </Space>
+          ) : null}
         </Form>
       </Modal>
 
-      {/* Card Modal */}
+      {/* Card Modal (Add) */}
       <Modal
-        title="绑定新卡片"
+        title="绑定新信用卡"
         open={cardModalOpen}
         onOk={handleSaveCard}
         onCancel={() => setCardModalOpen(false)}
@@ -399,24 +476,51 @@ export const Accounts: React.FC = () => {
       >
         <Form form={cardForm} layout="vertical">
           <Form.Item
-            name="card_last4"
-            label="卡号后四位"
+            name="tail"
+            label="卡号后四位 (尾号)"
             rules={[
-              { required: true, message: '请输入4位数字' },
+              { required: true, message: '请输入4位数字尾号' },
               { pattern: /^\d{4}$/, message: '必须为精确4位数字' },
             ]}
           >
             <Input maxLength={4} placeholder="如：8821" />
           </Form.Item>
 
-          <Form.Item name="card_alias" label="卡片别名 / 备注">
-            <Input placeholder="如：工资卡快捷支付、黑金主卡" />
+          <Form.Item name="display_name" label="卡片名称 / 备注 (可选)">
+            <Input placeholder="如：金穗白金信用卡主卡、工资快捷卡" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* Card Modal (Edit) */}
+      <Modal
+        title="编辑信用卡信息"
+        open={cardEditModalOpen}
+        onOk={handleSaveEditCard}
+        onCancel={() => setCardEditModalOpen(false)}
+        confirmLoading={cardEditSaving}
+        destroyOnClose
+      >
+        <Form form={cardEditForm} layout="vertical">
+          <Form.Item
+            name="tail"
+            label="卡号后四位 (尾号)"
+            rules={[
+              { required: true, message: '请输入4位数字尾号' },
+              { pattern: /^\d{4}$/, message: '必须为精确4位数字' },
+            ]}
+          >
+            <Input maxLength={4} placeholder="如：8821" />
           </Form.Item>
 
-          <Form.Item name="card_type" label="卡片类型">
+          <Form.Item name="display_name" label="卡片名称 / 备注">
+            <Input placeholder="如：金穗白金信用卡主卡" />
+          </Form.Item>
+
+          <Form.Item name="status" label="卡片状态" rules={[{ required: true }]}>
             <Select>
-              <Select.Option value="credit">信用卡</Select.Option>
-              <Select.Option value="debit">借记卡</Select.Option>
+              <Select.Option value="active">正常</Select.Option>
+              <Select.Option value="archived">已停用</Select.Option>
             </Select>
           </Form.Item>
         </Form>

@@ -40,7 +40,7 @@ export const Overview: React.FC = () => {
       setSyncing(true);
       // Trigger sync for first active mailbox if present
       const mailboxesRes = await mailboxApi.listMailboxes();
-      const mailboxes = mailboxesRes.data?.mailboxes || [];
+      const mailboxes = Array.isArray(mailboxesRes.data) ? mailboxesRes.data : (mailboxesRes.data?.mailboxes || []);
       const enabled = mailboxes.find((m: any) => m.is_enabled);
       if (enabled) {
         await mailboxApi.updateMailbox(enabled.id, { sync_now: true });

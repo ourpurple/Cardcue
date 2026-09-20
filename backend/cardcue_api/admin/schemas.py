@@ -19,12 +19,15 @@ class ChangePassword(Password):
 
 class AccountEdit(Strict):
     expected_revision: int = Field(ge=1)
+    bank: str | None = Field(None, min_length=1, max_length=100)
     alias: str | None = Field(None, max_length=100)
+    reference: str | None = Field(None, max_length=100)
     status: Literal["active", "archived"] = "active"
 
 class CardEdit(Strict):
     expected_revision: int = Field(ge=1)
     display_name: str | None = Field(None, max_length=100)
+    tail: str | None = Field(None, pattern=r"^[0-9]{4}$")
     status: Literal["active", "archived"] = "active"
 
 class MailConfig(Strict):

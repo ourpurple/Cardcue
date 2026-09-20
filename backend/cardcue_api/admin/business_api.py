@@ -206,6 +206,15 @@ async def list_accounts(session: AsyncSession = Depends(get_session)):
         "status": a.status,
         "revision": a.revision,
         "cards_count": len(a.cards),
+        "cards": [{
+            "id": str(c.id),
+            "account_id": str(c.account_id),
+            "tail": c.tail,
+            "display_name": c.display_name,
+            "status": c.status,
+            "revision": c.revision,
+            "created_at": c.created_at,
+        } for c in a.cards],
         "created_at": a.created_at,
         "updated_at": a.updated_at,
     } for a in accounts]
@@ -248,6 +257,10 @@ async def update_account(
     if acct.revision != data.expected_revision:
         raise HTTPException(409, "账户已被其他操作修改，请刷新重试")
 
+    if data.bank is not None:
+        acct.bank = data.bank
+    if data.reference is not None:
+        acct.reference = data.reference
     acct.alias = data.alias
     acct.status = data.status
     acct.revision += 1
@@ -352,6 +365,8 @@ async def update_card(
     if card.revision != data.expected_revision:
         raise HTTPException(409, "卡片已被其他操作修改，请刷新重试")
 
+    if data.tail is not None:
+        card.tail = data.tail
     card.display_name = data.display_name
     card.status = data.status
     card.revision += 1
