@@ -40,7 +40,27 @@ class Actor:
     session: WebSession | None = None
 
 def origin_check(request: Request):
-    if request.headers.get("origin") != settings.public_origin.rstrip("/"):
+    origin = request.headers.get("origin")
+    if not origin:
+        referer = request.headers.get("referer")
+        if referer:
+            from urllib.parse import urlsplit
+            r_parts = urlsplit(referer)
+            origin = f"{r_parts.scheme}://{r_parts.netloc}"
+    if not origin:
+        if settings.environment == "production":
+            raise HTTPException(403, "缺少请求来源标头，请从正式管理页面操作")
+        return
+
+    allowed = {settings.public_origin.rstrip("/")}
+    if settings.environment != "production":
+        allowed.update([
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:3000",
+        ])
+    if origin.rstrip("/") not in allowed:
         raise HTTPException(403, "请求来源不受信任，请从正式管理页面操作")
 
 async def authenticate(request: Request, session=Depends(get_session)) -> Actor:
