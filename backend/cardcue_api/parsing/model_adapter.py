@@ -166,8 +166,8 @@ class ModelStatementExtractor:
     ) -> None:
         self.api_key = (
             api_key
-            or getattr(settings, "llm_api_key", None)
-            or getattr(settings, "LLM_API_KEY", None)
+            if api_key is not None
+            else (getattr(settings, "llm_api_key", None) or getattr(settings, "LLM_API_KEY", None))
         )
         self.base_url = (
             base_url
@@ -191,9 +191,10 @@ class ModelStatementExtractor:
     @property
     def active_api_key(self) -> str | None:
         import os
+        if self.api_key is not None:
+            return self.api_key or None
         return (
-            self.api_key
-            or getattr(settings, "llm_api_key", None)
+            getattr(settings, "llm_api_key", None)
             or getattr(settings, "LLM_API_KEY", None)
             or os.environ.get("LLM_API_KEY")
         )

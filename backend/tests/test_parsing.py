@@ -259,7 +259,7 @@ def test_pdf_extractor_oversized_guard():
 # ---------------------------------------------------------------------------
 
 async def test_model_adapter_rule_fallback_when_no_key():
-    adapter = ModelStatementExtractor(api_key=None)
+    adapter = ModelStatementExtractor(api_key="")
     sample_text = "招商银行信用卡电子账单 本期应还金额：￥8,800.00 到期还款日：2026-10-15"
     draft, extractor_name = await adapter.extract(sample_text)
 
@@ -270,7 +270,7 @@ async def test_model_adapter_rule_fallback_when_no_key():
 
 
 async def test_model_adapter_fingerprint_caching():
-    adapter = ModelStatementExtractor(api_key=None)
+    adapter = ModelStatementExtractor(api_key="")
     sample_text = "中国建设银行信用卡对账单 本期应还款额：1,500.00 到期还款日：2026-10-20"
     
     draft1, mode1 = await adapter.extract(sample_text)

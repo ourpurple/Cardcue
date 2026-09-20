@@ -35,8 +35,8 @@ class Settings(BaseSettings):
         origin = urlsplit(self.public_origin)
         if origin.scheme != "https" or not origin.hostname or origin.path not in ("", "/"):
             raise ValueError("Production PUBLIC_ORIGIN must be an HTTPS origin")
-        if len(self.mail_encryption_key) < 40 or self.mail_encryption_key.startswith("cardcue-secret"):
-            raise ValueError("Set a unique MAIL_ENCRYPTION_KEY of at least 40 characters before production")
+        if len(self.mail_encryption_key) < 32 or self.mail_encryption_key.startswith("cardcue-secret"):
+            raise ValueError("Set a unique MAIL_ENCRYPTION_KEY of at least 32 characters before production")
 
     # LLM statement extraction settings
     llm_api_key: str | None = None

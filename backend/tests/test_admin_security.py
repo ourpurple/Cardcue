@@ -88,9 +88,18 @@ def test_validate_outbound_url():
     assert parsed.scheme == "https"
     assert parsed.hostname == "api.openai.com"
 
-    # HTTP rejected
+    # Valid http URL with custom port (e.g. self-hosted LLM gateway)
+    parsed_custom = validate_url("http://23.169.184.101:8317/v1")
+    assert parsed_custom.scheme == "http"
+    assert parsed_custom.hostname == "23.169.184.101"
+    assert parsed_custom.port == 8317
+
+    # Disallowed scheme rejected
     with pytest.raises(UnsafeDestination):
-        validate_url("http://api.openai.com/v1")
+        validate_url("ftp://api.openai.com/v1")
+
+    with pytest.raises(UnsafeDestination):
+        validate_url("file:///etc/passwd")
 
     # Userinfo rejected
     with pytest.raises(UnsafeDestination):
@@ -100,9 +109,36 @@ def test_validate_outbound_url():
     with pytest.raises(UnsafeDestination):
         validate_url("https://api.openai.com/v1?key=secret")
 
-    # Non-allowed port rejected
+    # Invalid port rejected
     with pytest.raises(UnsafeDestination):
-        validate_url("https://api.openai.com:8080/v1")
+        validate_url("https://api.openai.com:99999/v1")
+
+
+def test_validate_production_encryption_key():
+    orig_env = settings.environment
+    orig_origin = settings.public_origin
+    orig_key = settings.mail_encryption_key
+    try:
+        settings.environment = "production"
+        settings.public_origin = "https://cardcue.example.com"
+
+        # 32 characters key is accepted (standard AES-256)
+        settings.mail_encryption_key = "WoMCevRe4fkUW3yrrt4eCXR0cP1GOpF4"
+        settings.validate_production()  # should not raise
+
+        # Under 32 characters rejected
+        settings.mail_encryption_key = "too_short_key_under_32_chars"
+        with pytest.raises(ValueError, match="at least 32 characters"):
+            settings.validate_production()
+
+        # Default prefix rejected
+        settings.mail_encryption_key = "cardcue-secret-key-that-is-32-chars-long"
+        with pytest.raises(ValueError, match="Set a unique"):
+            settings.validate_production()
+    finally:
+        settings.environment = orig_env
+        settings.public_origin = orig_origin
+        settings.mail_encryption_key = orig_key
 
 
 def test_schema_password_complexity():

@@ -1,18 +1,22 @@
 version: '3.8'
 
 services:
+  # 可选本地开发/单机数据库（若使用外部数据库如 152.70.238.24，默认无需启动此容器）
+  # 若需要在 VPS 本地起容器化 PostgreSQL，可通过命令启动: docker compose --profile local-db up -d
   db:
     image: postgres:16-alpine
     container_name: cardcue_db
     restart: unless-stopped
+    profiles:
+      - local-db
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-cardcue}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cardcue_secure_password}
-      POSTGRES_DB: ${POSTGRES_DB:-cardcue}
+      POSTGRES_USER: ${POSTGRES_USER:-cardcube}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-cardcube}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cardcue} -d ${POSTGRES_DB:-cardcue}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cardcube} -d ${POSTGRES_DB:-cardcube}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -30,9 +34,6 @@ services:
       - .env
     volumes:
       - mail_data:/app/data/mail_storage
-    depends_on:
-      db:
-        condition: service_healthy
 
   worker:
     build:
@@ -48,8 +49,6 @@ services:
     depends_on:
       api:
         condition: service_started
-      db:
-        condition: service_healthy
 
   scheduler:
     build:
@@ -63,8 +62,6 @@ services:
     depends_on:
       api:
         condition: service_started
-      db:
-        condition: service_healthy
 
   web:
     build:
@@ -73,7 +70,7 @@ services:
     container_name: cardcue_web
     restart: unless-stopped
     ports:
-      # 映射到宿主机 127.0.0.1:3000，供宿主机 Nginx 反代并加载 HTTPS
+      # 映射到宿主机 127.0.0.1:3000，供宿主机 Nginx / Caddy 反代并加载 HTTPS 证书
       - "127.0.0.1:3000:80"
     depends_on:
       api:

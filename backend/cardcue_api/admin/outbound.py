@@ -10,12 +10,18 @@ class UnsafeDestination(ValueError):
     pass
 
 def validate_url(url: str):
-    parsed = urlsplit(url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise UnsafeDestination("模型地址必须是无账号、查询参数的 HTTPS 地址")
-    if parsed.port not in (None, 443, 8443):
-        raise UnsafeDestination("模型服务仅允许 443 或 8443 端口")
-    return parsed
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise UnsafeDestination("模型地址必须是无账号、查询参数的 HTTP 或 HTTPS 地址")
+        port = parsed.port or (80 if parsed.scheme == "http" else 443)
+        if not (1 <= port <= 65535):
+            raise UnsafeDestination("端口号不合法")
+        return parsed
+    except UnsafeDestination:
+        raise
+    except ValueError as e:
+        raise UnsafeDestination(f"地址格式或端口不合法: {e}") from e
 
 def resolve_public(host: str, port: int) -> str:
     allowed = {h.strip().lower() for h in settings.outbound_allowed_hosts.split(",") if h.strip()}
@@ -35,11 +41,20 @@ class PinnedTransport(httpx.AsyncBaseTransport):
         self.inner = httpx.AsyncHTTPTransport(retries=0)
     async def handle_async_request(self, request):
         parsed = validate_url(str(request.url))
-        ip = await asyncio.to_thread(resolve_public, parsed.hostname, parsed.port or 443)
+        port = parsed.port or (80 if parsed.scheme == "http" else 443)
+        ip = await asyncio.to_thread(resolve_public, parsed.hostname, port)
         headers = request.headers.copy()
         headers["Host"] = parsed.netloc
-        pinned = httpx.Request(request.method, request.url.copy_with(host=ip), headers=headers,
-                               stream=request.stream, extensions={**request.extensions, "sni_hostname": parsed.hostname})
+        extensions = dict(request.extensions)
+        if parsed.scheme == "https":
+            extensions["sni_hostname"] = parsed.hostname
+        pinned = httpx.Request(
+            request.method,
+            request.url.copy_with(host=ip),
+            headers=headers,
+            stream=request.stream,
+            extensions=extensions,
+        )
         return await self.inner.handle_async_request(pinned)
     async def aclose(self):
         await self.inner.aclose()
