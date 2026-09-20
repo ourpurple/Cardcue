@@ -91,7 +91,7 @@ def parse_model_response(content: str, email_date: date | None = None) -> Statem
         if isinstance(val, int):
             return val
         if isinstance(val, float):
-            raise ValueError("Model amounts must be integers in minor units, not floats")
+            return parse_amount_to_minor(str(val))
         if isinstance(val, str):
             val_clean = val.strip().replace(",", "").replace("¥", "").replace("￥", "").replace("$", "")
             if not val_clean:
@@ -119,7 +119,8 @@ def parse_model_response(content: str, email_date: date | None = None) -> Statem
             try:
                 return date.fromisoformat(val_clean)
             except Exception:
-                return None
+                pass
+            return parse_date_string(val_clean, ref_year)
         return None
 
     stmt_date = _to_date(data.get("statement_date"))

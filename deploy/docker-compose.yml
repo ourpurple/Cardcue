@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: cardcue_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cardcue}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cardcue_secure_password}
+      POSTGRES_DB: ${POSTGRES_DB:-cardcue}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cardcue} -d ${POSTGRES_DB:-cardcue}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: cardcue_api
+    restart: unless-stopped
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn cardcue_api.main:app --host 0.0.0.0 --port 8000 --proxy-headers"
+    env_file:
+      - .env
+    volumes:
+      - mail_data:/app/data/mail_storage
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: cardcue_worker
+    restart: unless-stopped
+    command: python -m cardcue_api.jobs.worker
+    env_file:
+      - .env
+    volumes:
+      - mail_data:/app/data/mail_storage
+    depends_on:
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+
+  scheduler:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: cardcue_scheduler
+    restart: unless-stopped
+    command: python -m cardcue_api.jobs.scheduler
+    env_file:
+      - .env
+    depends_on:
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    container_name: cardcue_web
+    restart: unless-stopped
+    ports:
+      # 映射到宿主机 127.0.0.1:3000，供宿主机 Nginx 反代并加载 HTTPS
+      - "127.0.0.1:3000:80"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  mail_data:
