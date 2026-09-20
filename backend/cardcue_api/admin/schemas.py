@@ -47,7 +47,7 @@ class MailConfig(Strict):
     sender_filter: str = Field(default="", max_length=500)
     subject_filter: str = Field(default="", max_length=500)
     keep_non_candidates: bool = False
-    auto_parse: bool = False
+    auto_parse: bool = True
 
 class RevisionRequest(Strict):
     expected_revision: int = Field(ge=1)
@@ -78,7 +78,7 @@ class JobCreate(Strict):
     kind: Literal["sync", "parse"]
     target_id: uuid.UUID
     since_days: int | None = Field(None, ge=1, le=3650)
-    allow_external: bool = False
+    allow_external: bool = True
     force: bool = False
 
 class DraftEdit(Strict):

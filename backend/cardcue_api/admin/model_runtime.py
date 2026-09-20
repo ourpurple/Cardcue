@@ -22,6 +22,21 @@ class ManagedExtractor:
         self.fingerprint = None
     async def extract(self, text: str, subject="", sender="", email_date=None):
         if self.revision is None:
+            try:
+                import uuid
+                from cardcue_api.admin.config_api import ensure_default_model_from_env
+                async with async_session_factory() as session:
+                    state = await session.get(RuntimeSettings, "model")
+                    if not (state and state.value and state.value.get("revision_id")):
+                        await ensure_default_model_from_env(session)
+                        state = await session.get(RuntimeSettings, "model")
+                    if state and state.value and state.value.get("revision_id"):
+                        rev = await session.get(ModelRevision, uuid.UUID(state.value["revision_id"]))
+                        if rev and not rev.revoked:
+                            self.revision = rev
+            except Exception:
+                pass
+        if self.revision is None:
             draft = HtmlStatementExtractor().extract(text, is_html=False, subject=subject, sender=sender, email_date=email_date)
             draft.review_reasons = list(dict.fromkeys([*draft.review_reasons, "rule_only:no_active_model"]))
             return draft, "rule"

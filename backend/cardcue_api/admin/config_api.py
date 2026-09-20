@@ -27,6 +27,7 @@ def revision_check(row, expected):
 
 def mailbox_public(row):
     config = dict(row.settings_json or {})
+    config.setdefault("auto_parse", True)
     config.update(email_address=row.email_address, imap_host=row.imap_host, imap_port=row.imap_port,
                   use_ssl=row.use_ssl, check_interval_minutes=row.check_interval_minutes)
     if row.pending_config:

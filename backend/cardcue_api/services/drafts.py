@@ -138,6 +138,10 @@ class DraftService:
                 try:
                     from cardcue_api.admin.models import ModelRevision, RuntimeSettings
                     state = await session.get(RuntimeSettings, "model")
+                    if not (state and state.value and state.value.get("revision_id")):
+                        from cardcue_api.admin.config_api import ensure_default_model_from_env
+                        await ensure_default_model_from_env(session)
+                        state = await session.get(RuntimeSettings, "model")
                     if state and state.value and state.value.get("revision_id"):
                         active_rev = await session.get(ModelRevision, uuid.UUID(state.value["revision_id"]))
                         if active_rev and not active_rev.revoked:

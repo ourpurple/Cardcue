@@ -84,7 +84,7 @@ export const MailboxConfig: React.FC = () => {
       since_days: mb.since_days || 90,
       max_messages: mb.max_messages || 100,
       max_attachment_mb: mb.max_attachment_mb || 10,
-      auto_parse: mb.auto_parse ?? false,
+      auto_parse: mb.auto_parse ?? true,
     });
     setModalVisible(true);
   };
@@ -114,7 +114,7 @@ export const MailboxConfig: React.FC = () => {
         since_days: 90,
         max_messages: 100,
         max_attachment_mb: 10,
-        auto_parse: false,
+        auto_parse: true,
       });
     }
   };

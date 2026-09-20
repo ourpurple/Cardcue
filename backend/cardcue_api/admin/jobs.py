@@ -30,8 +30,11 @@ async def enqueue(session, data: JobCreate, actor="scheduler"):
     if data.kind == "parse":
         state = await session.get(RuntimeSettings, "model")
         revision_id = (state.value if state else {}).get("revision_id")
-        if revision_id and not data.allow_external:
-            raise HTTPException(409, "需明确同意将邮件内容发送到配置的模型服务")
+        if not revision_id:
+            from cardcue_api.admin.config_api import ensure_default_model_from_env
+            await ensure_default_model_from_env(session)
+            state = await session.get(RuntimeSettings, "model")
+            revision_id = (state.value if state else {}).get("revision_id")
         payload["model_revision_id"] = revision_id
         if target.parse_status == "failed":
             target.parse_status = "pending"

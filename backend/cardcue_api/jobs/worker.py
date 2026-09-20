@@ -40,7 +40,7 @@ async def run_job(identifier):
                 status = "succeeded" if mail_job.status == "completed" else mail_job.status
                 result = {"mail_job_id": str(mail_job.id), "fetched": mail_job.emails_fetched}
                 mailbox = await s.get(Mailbox, target_id)
-                if mailbox.is_active and (mailbox.settings_json or {}).get("auto_parse"):
+                if mailbox.is_active and (mailbox.settings_json or {}).get("auto_parse", True):
                     sources = list((await s.execute(select(EmailSource).where(EmailSource.mailbox_id == target_id, EmailSource.parse_status == "pending", EmailSource.is_statement_candidate.is_(True)).limit(100))).scalars())
                     for source in sources:
                         await enqueue(s, JobCreate(kind="parse", target_id=source.id, allow_external=True), "worker")
@@ -54,6 +54,10 @@ async def run_job(identifier):
                         revision = None
                 if not revision:
                     state = await s.get(RuntimeSettings, "model")
+                    if not (state and state.value and state.value.get("revision_id")):
+                        from cardcue_api.admin.config_api import ensure_default_model_from_env
+                        await ensure_default_model_from_env(s)
+                        state = await s.get(RuntimeSettings, "model")
                     if state and state.value and state.value.get("revision_id"):
                         try:
                             revision = await s.get(ModelRevision, uuid.UUID(state.value["revision_id"]))
