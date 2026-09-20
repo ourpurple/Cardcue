@@ -29,6 +29,7 @@ import {
   StopOutlined,
   StarOutlined,
   StarFilled,
+  DeleteOutlined,
 } from '@ant-design/icons';
 import { modelApi } from '../api';
 import { ModelProfileItem, ModelRevisionItem } from '../types';
@@ -171,6 +172,17 @@ export const ModelConfig: React.FC = () => {
     }
   };
 
+  const handleDeleteProfile = async (p: ModelProfileItem) => {
+    try {
+      await modelApi.deleteModel(p.id);
+      message.success(`模型配置方案【${p.name}】已成功删除`);
+      fetchModels();
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || '删除失败，请重试';
+      message.error(msg);
+    }
+  };
+
   const handleActivate = async (revId: string) => {
     try {
       await modelApi.activateRevision(revId);
@@ -235,9 +247,10 @@ export const ModelConfig: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 280,
+      width: 350,
       render: (_: any, p: ModelProfileItem) => {
         const activeRev = p.revisions.find((r) => r.active) || p.revisions[0];
+        const hasActive = p.revisions.some((r) => r.active);
         return (
           <Space size="small">
             <Button size="small" icon={<PlusOutlined />} onClick={() => openNewRevisionModal(p)}>
@@ -261,6 +274,31 @@ export const ModelConfig: React.FC = () => {
               >
                 连通测试
               </Button>
+            )}
+            {hasActive ? (
+              <Popconfirm
+                title="无法删除激活的模型方案"
+                description="该方案当前处于全局激活状态。请先在其他方案中激活一个版本后再删除本方案。"
+                okText="知道了"
+                showCancel={false}
+              >
+                <Button size="small" danger disabled icon={<DeleteOutlined />}>
+                  删除
+                </Button>
+              </Popconfirm>
+            ) : (
+              <Popconfirm
+                title="确定删除此模型方案吗？"
+                description="删除后该方案及其所有历史版本将被永久移除，此操作不可撤销。"
+                okText="确认删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => handleDeleteProfile(p)}
+              >
+                <Button size="small" danger icon={<DeleteOutlined />}>
+                  删除
+                </Button>
+              </Popconfirm>
             )}
           </Space>
         );

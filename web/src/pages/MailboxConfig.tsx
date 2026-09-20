@@ -27,6 +27,7 @@ import {
   PlayCircleOutlined,
   StopOutlined,
   EditOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons';
 import { mailboxApi, jobsApi } from '../api';
 import { MailboxItem } from '../types';
@@ -203,6 +204,20 @@ export const MailboxConfig: React.FC = () => {
     }
   };
 
+  const handleDelete = async (mb: MailboxItem) => {
+    setActionLoadingId(mb.id);
+    try {
+      await mailboxApi.deleteMailbox(mb.id);
+      message.success(`邮箱【${mb.name || mb.email_address}】配置已成功删除`);
+      fetchMailboxes();
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || '删除失败，请重试';
+      message.error(msg);
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
   const columns = [
     {
       title: '配置名称 / 邮箱地址',
@@ -268,7 +283,7 @@ export const MailboxConfig: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 320,
+      width: 380,
       render: (_: any, mb: MailboxItem) => {
         const loadingThis = actionLoadingId === mb.id;
         const isTested = mb.tested_revision === mb.revision;
@@ -317,6 +332,18 @@ export const MailboxConfig: React.FC = () => {
                 立即同步
               </Button>
             )}
+            <Popconfirm
+              title="确定删除此邮箱配置吗？"
+              description="删除后相关的拉取历史记录将一并清理，此操作不可撤销。"
+              okText="确认删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleDelete(mb)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} loading={loadingThis}>
+                删除
+              </Button>
+            </Popconfirm>
           </Space>
         );
       },

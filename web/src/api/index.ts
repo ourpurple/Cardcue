@@ -71,6 +71,8 @@ export const mailboxApi = {
     apiClient.post(`/admin/mailboxes/${id}/enable`, { expected_revision: revision }),
   disableMailbox: (id: string, revision: number) =>
     apiClient.post(`/admin/mailboxes/${id}/disable`, { expected_revision: revision }),
+  deleteMailbox: (id: string) =>
+    apiClient.delete(`/admin/mailboxes/${id}`),
 };
 
 // 7. Model Config API
@@ -85,6 +87,8 @@ export const modelApi = {
     apiClient.post(`/admin/model-revisions/${revisionId}/activate`),
   revokeRevision: (revisionId: string) =>
     apiClient.post(`/admin/model-revisions/${revisionId}/revoke`),
+  deleteModel: (id: string) =>
+    apiClient.delete(`/admin/models/${id}`),
 };
 
 // 8. Drafts API

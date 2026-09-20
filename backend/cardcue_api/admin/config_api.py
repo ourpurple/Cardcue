@@ -1,14 +1,16 @@
 import asyncio
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
-from cardcue_api.admin.models import ModelProfile, ModelRevision, RuntimeSettings
+import shutil
+from sqlalchemy import delete, select, update
+from cardcue_api.admin.models import AdminJob, ModelCall, ModelProfile, ModelRevision, RuntimeSettings
 from cardcue_api.admin.schemas import MailConfig, ModelConfig, ModelTest, RevisionRequest
 from cardcue_api.admin.security import audit, now, recent_admin, require_admin
 from cardcue_api.mail.client import ReadOnlyImapClient
 from cardcue_api.mail.crypto import decrypt_token, encrypt_token
 from cardcue_api.persistence.database import get_session
-from cardcue_api.persistence.mail import Mailbox
+from cardcue_api.persistence.drafts import StatementDraftModel
+from cardcue_api.persistence.mail import EmailAttachment, EmailSource, MailCursor, MailJob, Mailbox
 
 router = APIRouter(prefix="/v1/admin", tags=["configuration"], dependencies=[Depends(require_admin)])
 
@@ -119,6 +121,69 @@ async def disable_mailbox(identifier: uuid.UUID, data: RevisionRequest, actor=De
     await audit(session, actor, "mailbox_disabled", row.id)
     return mailbox_public(row)
 
+@router.delete("/mailboxes/{identifier}")
+async def delete_mailbox(identifier: uuid.UUID, actor=Depends(require_admin), session=Depends(get_session)):
+    row = await get_locked(session, Mailbox, identifier)
+    email_addr = row.email_address
+
+    # 1. Gather all email source IDs under this mailbox
+    source_ids = (await session.execute(
+        select(EmailSource.id).where(EmailSource.mailbox_id == identifier)
+    )).scalars().all()
+
+    if source_ids:
+        # Unlink drafts associated with these email sources
+        await session.execute(
+            update(StatementDraftModel)
+            .where(StatementDraftModel.email_source_id.in_(source_ids))
+            .values(email_source_id=None)
+        )
+        # Delete admin background jobs for these email sources
+        await session.execute(
+            delete(AdminJob).where(AdminJob.target_id.in_(source_ids))
+        )
+        # Delete attachments
+        await session.execute(
+            delete(EmailAttachment).where(EmailAttachment.email_source_id.in_(source_ids))
+        )
+        # Delete email sources
+        await session.execute(
+            delete(EmailSource).where(EmailSource.mailbox_id == identifier)
+        )
+
+    # 2. Unlink drafts directly referencing this mailbox
+    await session.execute(
+        update(StatementDraftModel)
+        .where(StatementDraftModel.mailbox_id == identifier)
+        .values(mailbox_id=None)
+    )
+
+    # 3. Clean up mail cursors, mail jobs, and admin jobs for this mailbox
+    await session.execute(
+        delete(MailCursor).where(MailCursor.mailbox_id == identifier)
+    )
+    await session.execute(
+        delete(MailJob).where(MailJob.mailbox_id == identifier)
+    )
+    await session.execute(
+        delete(AdminJob).where(AdminJob.target_id == identifier)
+    )
+
+    # 4. Clean up disk files under storage directory
+    try:
+        from cardcue_api.mail.storage import MailStorageManager
+        storage = MailStorageManager()
+        mb_dir = storage.base_dir / str(identifier)
+        if mb_dir.exists() and mb_dir.is_dir():
+            shutil.rmtree(mb_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+    # 5. Delete the mailbox record
+    await session.delete(row)
+    await audit(session, actor, "mailbox_deleted", str(identifier), {"email_address": email_addr})
+    return {"ok": True, "id": str(identifier)}
+
 async def model_public(session, profile):
     revisions = list((await session.execute(select(ModelRevision).where(ModelRevision.profile_id == profile.id).order_by(ModelRevision.number.desc()))).scalars())
     state = await session.get(RuntimeSettings, "model")
@@ -164,6 +229,31 @@ async def create_model(data: ModelConfig, actor=Depends(recent_admin), session=D
 @router.put("/models/{identifier}")
 async def update_model(identifier: uuid.UUID, data: ModelConfig, actor=Depends(recent_admin), session=Depends(get_session)):
     return await save_model(session, data, actor, identifier)
+
+@router.delete("/models/{identifier}")
+async def delete_model(identifier: uuid.UUID, actor=Depends(require_admin), session=Depends(get_session)):
+    profile = await get_locked(session, ModelProfile, identifier)
+    rev_ids = (await session.execute(
+        select(ModelRevision.id).where(ModelRevision.profile_id == identifier)
+    )).scalars().all()
+
+    # Check if any revision is globally active
+    state = await session.get(RuntimeSettings, "model")
+    active_id = (state.value or {}).get("revision_id") if state else None
+    if active_id and any(str(r) == str(active_id) for r in rev_ids):
+        raise HTTPException(400, "该方案包含当前处于全局激活状态的模型版本，无法直接删除。请先激活其他模型方案。")
+
+    if rev_ids:
+        await session.execute(
+            delete(ModelCall).where(ModelCall.revision_id.in_(rev_ids))
+        )
+        await session.execute(
+            delete(ModelRevision).where(ModelRevision.profile_id == identifier)
+        )
+
+    await session.delete(profile)
+    await audit(session, actor, "model_profile_deleted", str(identifier), {"name": profile.name})
+    return {"ok": True, "id": str(identifier)}
 
 @router.post("/model-revisions/{identifier}/test")
 async def test_model(identifier: uuid.UUID, data: ModelTest, actor=Depends(recent_admin), session=Depends(get_session)):
