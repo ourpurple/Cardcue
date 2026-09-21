@@ -23,6 +23,7 @@ import com.cardcue.app.feature.billing.PaymentDialog
 import com.cardcue.app.feature.history.HistoryScreen
 import com.cardcue.app.feature.home.DraftReviewDialog
 import com.cardcue.app.feature.home.HomeScreen
+import com.cardcue.app.feature.settings.PairingDialog
 import com.cardcue.app.feature.settings.SettingsScreen
 import kotlinx.coroutines.delay
 import java.time.LocalDate
@@ -36,6 +37,7 @@ fun CardCueApp(model: CardCueViewModel) {
     var paymentId by rememberSaveable { mutableStateOf<String?>(null) }
     var reviewingDraftId by rememberSaveable { mutableStateOf<String?>(null) }
     var syncInfoDialog by rememberSaveable { mutableStateOf(false) }
+    var showPairingDialog by rememberSaveable { mutableStateOf(false) }
     var today by remember { mutableStateOf(LocalDate.now()) }
     val snackbar = remember { SnackbarHostState() }
     val syncInfo by model.syncInfo.collectAsStateWithLifecycle()
@@ -99,7 +101,15 @@ fun CardCueApp(model: CardCueViewModel) {
                     onReviewDraft = { reviewingDraftId = it.id }
                 )
                 tab == 1 -> HistoryScreen(state.bills, historyFilter, pageModifier, onFilter = { historyFilter = it }, onOpen = { selectedId = it })
-                else -> SettingsScreen(pageModifier, onResetAllData = { model.resetAllData() })
+                else -> SettingsScreen(
+                    syncInfo = syncInfo,
+                    busy = state.busy,
+                    modifier = pageModifier,
+                    onOpenPairDialog = { showPairingDialog = true },
+                    onSyncNow = { model.syncNow() },
+                    onUnpair = { model.unpairDevice() },
+                    onResetAllData = { model.resetAllData() }
+                )
             }
         }
         state.bills.find { it.statement.id == paymentId }?.let { bill ->
@@ -133,7 +143,11 @@ fun CardCueApp(model: CardCueViewModel) {
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("服务地址: ${syncInfo.serverUrl}", fontSize = 13.sp, color = Ink)
-                    Text("设备状态: ${if (syncInfo.isPaired) "已配对 (${syncInfo.deviceId?.take(8)}...)" else "未配对 (首次联网将自动配对)"}", fontSize = 13.sp, color = Muted)
+                    Text(
+                        "设备状态: ${if (syncInfo.isPaired) "已配对 (${syncInfo.deviceId?.take(8)}...)" else "未配对 (需要输入配对码)"}",
+                        fontSize = 13.sp,
+                        color = if (syncInfo.isPaired) Ink else Red
+                    )
                     Text("同步状态: ${when (syncInfo.state) {
                         com.cardcue.app.sync.SyncState.SYNCING -> "正在同步数据..."
                         com.cardcue.app.sync.SyncState.SUCCESS -> "数据已是最新"
@@ -149,26 +163,59 @@ fun CardCueApp(model: CardCueViewModel) {
             dismissButton = {
                 Row {
                     TextButton(onClick = { syncInfoDialog = false }) { Text("关闭") }
-                    Spacer(Modifier.width(4.dp))
-                    TextButton(
-                        onClick = { model.parsePendingEmails() },
-                        enabled = syncInfo.state != com.cardcue.app.sync.SyncState.SYNCING
-                    ) { Text("解析邮件") }
+                    if (syncInfo.isPaired) {
+                        Spacer(Modifier.width(4.dp))
+                        TextButton(
+                            onClick = { model.parsePendingEmails() },
+                            enabled = syncInfo.state != com.cardcue.app.sync.SyncState.SYNCING
+                        ) { Text("解析邮件") }
+                    }
                 }
             },
             confirmButton = {
                 Row {
-                    TextButton(
-                        onClick = { model.checkNewEmails() },
-                        enabled = syncInfo.state != com.cardcue.app.sync.SyncState.SYNCING
-                    ) { Text("收取邮件") }
-                    Spacer(Modifier.width(4.dp))
-                    TextButton(
-                        onClick = { model.syncNow() },
-                        enabled = syncInfo.state != com.cardcue.app.sync.SyncState.SYNCING
-                    ) { Text("立即同步") }
+                    if (!syncInfo.isPaired) {
+                        Button(
+                            onClick = {
+                                syncInfoDialog = false
+                                showPairingDialog = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Outlined.Key, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("输入配对码", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        TextButton(
+                            onClick = { model.checkNewEmails() },
+                            enabled = syncInfo.state != com.cardcue.app.sync.SyncState.SYNCING
+                        ) { Text("收取邮件") }
+                        Spacer(Modifier.width(4.dp))
+                        TextButton(
+                            onClick = { model.syncNow() },
+                            enabled = syncInfo.state != com.cardcue.app.sync.SyncState.SYNCING
+                        ) { Text("立即同步") }
+                    }
                 }
             },
         )
+        if (showPairingDialog) {
+            PairingDialog(
+                currentServerUrl = syncInfo.serverUrl,
+                busy = state.busy,
+                onDismiss = { showPairingDialog = false },
+                onConfirmPair = { serverUrl, pairingCode, deviceName, onError ->
+                    model.pairDevice(
+                        serverUrl = serverUrl,
+                        pairingCode = pairingCode,
+                        deviceName = deviceName.ifBlank { null },
+                        onSuccess = { showPairingDialog = false },
+                        onError = { err -> onError(err) }
+                    )
+                }
+            )
+        }
     }
 }

@@ -177,6 +177,7 @@ fun shortBankName(bank: String): String = when {
 @Composable
 private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: () -> Unit) {
     val s = bill.statement
+    val urgent = !bill.settled && BillingRules.daysUntil(LocalDate.parse(s.dueDate), today) <= 3
     val isNew = !s.isDemo && runCatching {
         val stDate = LocalDate.parse(s.statementDate)
         val diff = java.time.temporal.ChronoUnit.DAYS.between(stDate, today)
@@ -192,7 +193,7 @@ private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: ()
         modifier = Modifier
             .testTag("home-bill-${s.id}")
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+            .padding(horizontal = 16.dp, vertical = 4.dp),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White)
     ) {
@@ -227,8 +228,8 @@ private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: ()
                 }
             }
 
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-                // Top row: BankBadge + Bank Name + Cardholder + Tails + MoreHoriz icon
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                // Top row: BankBadge + Bank Name + Cardholder + Tails + Countdown badge + MoreHoriz icon
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     BankBadge(s.bankMark, Color(s.color), compact = true)
                     Spacer(Modifier.width(8.dp))
@@ -253,6 +254,28 @@ private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: ()
                             .weight(1f)
                             .testTag("home-cards-${s.id}")
                     )
+                    if (!bill.settled && daysUntil in -30L..30L) {
+                        val badgeText = when {
+                            daysUntil < 0L -> "${-daysUntil}天逾期"
+                            daysUntil == 0L -> "今天到期"
+                            daysUntil == 1L -> "明天到期"
+                            daysUntil == 2L -> "后天到期"
+                            else -> "${daysUntil}天到期"
+                        }
+                        Surface(
+                            color = if (isCoral) Red.copy(alpha = 0.12f) else Gold.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = badgeText,
+                                color = if (isCoral) Red else Ink,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                    }
                     IconButton(
                         onClick = onOpen,
                         modifier = Modifier.size(24.dp)
@@ -266,104 +289,39 @@ private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: ()
                     }
                 }
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(4.dp))
 
-                // Middle row: 3 columns
+                // Middle row: Amount & Action Button
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Col 1: Amount & "本期账单"
-                    Column(modifier = Modifier.weight(1.1f)) {
-                        val amountText = when {
-                            bill.remaining > 0L -> {
-                                if (s.currency == "CNY") {
-                                    String.format(java.util.Locale.US, "%.2f", bill.remaining / 100.0)
-                                } else {
-                                    Money.display(bill.remaining, s.currency)
-                                }
-                            }
-                            s.amountMinor == 0L -> "待更新"
-                            bill.settled -> "0.00"
-                            else -> "待更新"
-                        }
-                        Text(
-                            text = amountText,
-                            fontSize = 22.sp,
-                            lineHeight = 26.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = (-0.5).sp,
-                            color = if (amountText == "待更新") Color(0xFF8C8C8C) else Ink,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.testTag("home-remaining-${s.id}")
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            text = "本期账单",
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp,
-                            color = Color(0xFF8C8C8C)
-                        )
+                    val amountText = when {
+                        bill.remaining > 0L -> Money.display(bill.remaining, s.currency)
+                        bill.settled -> Money.display(0L, s.currency)
+                        else -> "待更新"
                     }
+                    Text(
+                        text = amountText,
+                        fontSize = 22.sp,
+                        lineHeight = 28.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = (-0.5).sp,
+                        color = if (bill.settled) Green else Ink,
+                        maxLines = 1,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("home-remaining-${s.id}")
+                    )
+                    Spacer(Modifier.width(8.dp))
 
-                    // Col 2: Countdown & Due Date
-                    val countdownChar = when {
-                        daysUntil < 0L -> "${-daysUntil}"
-                        daysUntil == 0L -> "今"
-                        daysUntil == 1L -> "明"
-                        daysUntil == 2L -> "后"
-                        else -> "$daysUntil"
-                    }
-                    val countdownUnit = when {
-                        daysUntil < 0L -> "天逾期"
-                        daysUntil in 0L..2L -> "天到期"
-                        else -> "天后到期"
-                    }
-                    val dateText = if (dueDate != null) {
-                        String.format(java.util.Locale.US, "%02d-%02d", dueDate.monthValue, dueDate.dayOfMonth)
-                    } else {
-                        s.dueDate
-                    }
-
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = countdownChar,
-                            fontSize = 28.sp,
-                            lineHeight = 32.sp,
-                            fontWeight = FontWeight.Normal,
-                            color = if (isCoral) Color(0xFFE85D4E) else Color(0xFF262626)
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Column {
-                            Text(
-                                text = countdownUnit,
-                                fontSize = 11.sp,
-                                lineHeight = 14.sp,
-                                color = if (isCoral) Color(0xFFE85D4E) else Color(0xFF595959)
-                            )
-                            Text(
-                                text = dateText,
-                                fontSize = 11.sp,
-                                lineHeight = 14.sp,
-                                color = Color(0xFF8C8C8C),
-                                maxLines = 1,
-                                modifier = Modifier.testTag("home-due-${s.id}")
-                            )
-                        }
-                    }
-
-                    // Col 3: Action Button (Pill)
                     val pillBg: Color
                     val pillText: String
                     val pillTextColor: Color
                     when {
                         bill.remaining > 0L -> {
                             pillBg = Color(0xFFEAA655)
-                            pillText = "还款"
+                            pillText = "记录还款"
                             pillTextColor = Color.White
                         }
                         bill.settled -> {
@@ -385,18 +343,27 @@ private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: ()
                             containerColor = pillBg,
                             contentColor = pillTextColor
                         ),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
                         modifier = Modifier
                             .testTag("home-pay-${s.id}")
-                            .defaultMinSize(minHeight = 48.dp, minWidth = 76.dp)
+                            .defaultMinSize(minHeight = 48.dp)
                     ) {
                         Text(
                             text = pillText,
-                            fontSize = 13.sp,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
                     }
                 }
+
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "账单日 ${s.statementDate} · 还款日 ${s.dueDate}",
+                    color = if (bill.settled) Green else if (urgent) Red else Muted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    modifier = Modifier.fillMaxWidth().testTag("home-due-${s.id}")
+                )
 
                 if (s.cardTails.contains("·")) {
                     Text(
@@ -404,7 +371,7 @@ private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: ()
                         color = Green,
                         fontSize = 11.sp,
                         lineHeight = 16.sp,
-                        modifier = Modifier.padding(top = 8.dp)
+                        modifier = Modifier.padding(top = 2.dp)
                     )
                 }
             }

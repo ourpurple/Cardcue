@@ -502,6 +502,8 @@ async def list_statements(
     account_id: uuid.UUID | None = None,
     currency: str | None = None,
     status: Literal["all", "unpaid", "paid"] = "all",
+    sort_by: Literal["due_date", "statement_date", "created_at"] = "due_date",
+    sort_order: Literal["asc", "desc"] = "asc",
     session: AsyncSession = Depends(get_session),
 ):
     query = (
@@ -517,7 +519,20 @@ async def list_statements(
     if currency:
         query = query.where(Statement.currency == currency)
 
-    query = query.order_by(Statement.statement_date.desc(), Statement.created_at.desc())
+    if sort_by == "due_date":
+        col_order = Statement.due_date.asc() if sort_order == "asc" else Statement.due_date.desc()
+        sec_order = Statement.statement_date.asc() if sort_order == "asc" else Statement.statement_date.desc()
+        third_order = Statement.created_at.asc() if sort_order == "asc" else Statement.created_at.desc()
+        query = query.order_by(col_order, sec_order, third_order)
+    elif sort_by == "statement_date":
+        col_order = Statement.statement_date.asc() if sort_order == "asc" else Statement.statement_date.desc()
+        sec_order = Statement.created_at.asc() if sort_order == "asc" else Statement.created_at.desc()
+        query = query.order_by(col_order, sec_order)
+    elif sort_by == "created_at":
+        col_order = Statement.created_at.asc() if sort_order == "asc" else Statement.created_at.desc()
+        query = query.order_by(col_order)
+    else:
+        query = query.order_by(Statement.due_date.asc(), Statement.statement_date.asc(), Statement.created_at.asc())
     results = list((await session.execute(query)).all())
 
     items = []

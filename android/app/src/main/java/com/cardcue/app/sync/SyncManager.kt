@@ -29,6 +29,7 @@ data class SyncInfo(
     val serverUrl: String = SyncManager.DEFAULT_SERVER_URL,
     val isPaired: Boolean = false,
     val deviceId: String? = null,
+    val deviceName: String? = null,
     val isOffline: Boolean = false,
 )
 
@@ -39,11 +40,12 @@ class SyncManager(
 ) {
     companion object {
         const val DEFAULT_SERVER_URL = "http://152.70.238.24:8000"
-        private const val META_SERVER_URL = "sync_server_url"
-        private const val META_DEVICE_TOKEN = "sync_device_token"
-        private const val META_DEVICE_ID = "sync_device_id"
-        private const val META_CURSOR = "sync_cursor"
-        private const val META_LAST_SYNC_TIME = "sync_last_time"
+        const val META_SERVER_URL = "sync_server_url"
+        const val META_DEVICE_TOKEN = "sync_device_token"
+        const val META_DEVICE_ID = "sync_device_id"
+        const val META_DEVICE_NAME = "sync_device_name"
+        const val META_CURSOR = "sync_cursor"
+        const val META_LAST_SYNC_TIME = "sync_last_time"
     }
 
     private val dao = db.dao()
@@ -51,25 +53,131 @@ class SyncManager(
     private val _syncInfo = MutableStateFlow(SyncInfo(serverUrl = serverUrl))
     val syncInfo = _syncInfo.asStateFlow()
 
+    suspend fun getActiveServerUrl(): String {
+        val saved = dao.syncMeta(META_SERVER_URL)
+        return if (!saved.isNullOrBlank()) saved else _syncInfo.value.serverUrl.ifBlank { serverUrl }
+    }
+
     suspend fun init() = withContext(Dispatchers.IO) {
+        val savedUrl = dao.syncMeta(META_SERVER_URL)
+        val activeUrl = if (!savedUrl.isNullOrBlank()) savedUrl else serverUrl
         val token = dao.syncMeta(META_DEVICE_TOKEN)
         val deviceId = dao.syncMeta(META_DEVICE_ID)
+        val deviceName = dao.syncMeta(META_DEVICE_NAME)
         val lastTime = dao.syncMeta(META_LAST_SYNC_TIME)
         val isPaired = !token.isNullOrBlank() && !deviceId.isNullOrBlank()
         _syncInfo.value = _syncInfo.value.copy(
+            serverUrl = activeUrl,
             isPaired = isPaired,
             deviceId = deviceId,
+            deviceName = deviceName,
             lastSyncTime = lastTime,
-            state = if (isPaired) SyncState.IDLE else SyncState.IDLE
+            state = SyncState.IDLE
         )
+    }
+
+    suspend fun pairWithCode(
+        targetServerUrl: String,
+        pairingCode: String,
+        customDeviceName: String? = null
+    ): PairResponse = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val normalizedUrl = targetServerUrl.trim().removeSuffix("/")
+            val cleanCode = pairingCode.trim()
+            require(normalizedUrl.isNotBlank()) { "服务器地址不能为空" }
+            require(normalizedUrl.startsWith("http://") || normalizedUrl.startsWith("https://")) {
+                "服务器地址需以 http:// 或 https:// 开头"
+            }
+            require(cleanCode.length >= 20) { "配对码格式不正确 (至少 20 位)" }
+
+            val modelName = Build.MODEL ?: "Device"
+            val devName = customDeviceName?.trim()?.takeIf { it.isNotBlank() } ?: "CardCue Android ($modelName)"
+
+            _syncInfo.value = _syncInfo.value.copy(
+                state = SyncState.SYNCING,
+                serverUrl = normalizedUrl,
+                message = "正在连接并配对设备..."
+            )
+
+            // 1. Call pairDevice
+            val pairRes = apiClient.pairDevice(normalizedUrl, devName, cleanCode)
+
+            // 2. Persist to DB
+            db.withTransaction {
+                dao.setSyncMeta(SyncMeta(META_SERVER_URL, normalizedUrl))
+                dao.setSyncMeta(SyncMeta(META_DEVICE_TOKEN, pairRes.token))
+                dao.setSyncMeta(SyncMeta(META_DEVICE_ID, pairRes.deviceId))
+                dao.setSyncMeta(SyncMeta(META_DEVICE_NAME, devName))
+                dao.deleteSyncMeta(META_CURSOR)
+            }
+
+            _syncInfo.value = _syncInfo.value.copy(
+                isPaired = true,
+                deviceId = pairRes.deviceId,
+                deviceName = devName,
+                serverUrl = normalizedUrl,
+                isOffline = false,
+                message = "配对成功，正在拉取最新账单..."
+            )
+
+            // 3. Perform initial bootstrap
+            try {
+                performBootstrap(normalizedUrl, pairRes.token)
+                val now = formatNow()
+                db.withTransaction {
+                    dao.setSyncMeta(SyncMeta(META_LAST_SYNC_TIME, now))
+                }
+                _syncInfo.value = _syncInfo.value.copy(
+                    state = SyncState.SUCCESS,
+                    lastSyncTime = now,
+                    message = "配对并同步成功"
+                )
+            } catch (e: Exception) {
+                _syncInfo.value = _syncInfo.value.copy(
+                    state = SyncState.SUCCESS,
+                    message = "配对成功，但初始拉取稍后重试: ${e.message}"
+                )
+            }
+
+            pairRes
+        }
+    }
+
+    suspend fun unpairDevice(): Boolean = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            db.withTransaction {
+                dao.deleteSyncMeta(META_DEVICE_TOKEN)
+                dao.deleteSyncMeta(META_DEVICE_ID)
+                dao.deleteSyncMeta(META_DEVICE_NAME)
+                dao.deleteSyncMeta(META_CURSOR)
+                dao.deleteSyncMeta(META_LAST_SYNC_TIME)
+                dao.clearAllSyncedData()
+            }
+            val activeUrl = dao.syncMeta(META_SERVER_URL) ?: serverUrl
+            _syncInfo.value = _syncInfo.value.copy(
+                isPaired = false,
+                deviceId = null,
+                deviceName = null,
+                serverUrl = activeUrl,
+                lastSyncTime = null,
+                state = SyncState.IDLE,
+                message = "已解除配对，恢复演示模式"
+            )
+            true
+        }
     }
 
     suspend fun syncNow(forceBootstrap: Boolean = false): Boolean = mutex.withLock {
         withContext(Dispatchers.IO) {
-            _syncInfo.value = _syncInfo.value.copy(state = SyncState.SYNCING, message = "正在检查服务器连接...")
+            val currentServerUrl = getActiveServerUrl()
+            _syncInfo.value = _syncInfo.value.copy(
+                state = SyncState.SYNCING,
+                serverUrl = currentServerUrl,
+                message = "正在检查服务器连接..."
+            )
 
             // 1. Health check
-            val healthy = apiClient.checkHealth(serverUrl)
+            val healthy = apiClient.checkHealth(currentServerUrl)
             if (!healthy) {
                 _syncInfo.value = _syncInfo.value.copy(
                     state = SyncState.OFFLINE,
@@ -80,28 +188,15 @@ class SyncManager(
             }
 
             // 2. Ensure paired
-            var token = dao.syncMeta(META_DEVICE_TOKEN)
-            var deviceId = dao.syncMeta(META_DEVICE_ID)
+            val token = dao.syncMeta(META_DEVICE_TOKEN)
+            val deviceId = dao.syncMeta(META_DEVICE_ID)
             if (token.isNullOrBlank() || deviceId.isNullOrBlank()) {
-                try {
-                    _syncInfo.value = _syncInfo.value.copy(message = "正在配对设备...")
-                    val modelName = Build.MODEL ?: "Device"
-                    val deviceName = "CardCue Android (${modelName})"
-                    val pairRes = apiClient.pairDevice(serverUrl, deviceName)
-                    token = pairRes.token
-                    deviceId = pairRes.deviceId
-                    db.withTransaction {
-                        dao.setSyncMeta(SyncMeta(META_DEVICE_TOKEN, token))
-                        dao.setSyncMeta(SyncMeta(META_DEVICE_ID, deviceId))
-                    }
-                    _syncInfo.value = _syncInfo.value.copy(isPaired = true, deviceId = deviceId)
-                } catch (e: Exception) {
-                    _syncInfo.value = _syncInfo.value.copy(
-                        state = SyncState.ERROR,
-                        message = "设备配对失败: ${e.message}"
-                    )
-                    return@withContext false
-                }
+                _syncInfo.value = _syncInfo.value.copy(
+                    state = SyncState.IDLE,
+                    isPaired = false,
+                    message = "设备未配对，请在设置中输入配对码"
+                )
+                return@withContext false
             }
 
             // 3. Sync data
@@ -111,13 +206,13 @@ class SyncManager(
 
             try {
                 if (forceBootstrap || currentCursor == 0L) {
-                    performBootstrap(activeToken)
+                    performBootstrap(currentServerUrl, activeToken)
                 } else {
                     try {
-                        performIncrementalSync(activeToken, currentCursor)
+                        performIncrementalSync(currentServerUrl, activeToken, currentCursor)
                     } catch (e: CursorOutOfRangeException) {
                         // Cursor invalid / server restore -> fallback to bootstrap
-                        performBootstrap(activeToken)
+                        performBootstrap(currentServerUrl, activeToken)
                     }
                 }
 
@@ -135,8 +230,8 @@ class SyncManager(
             } catch (e: SyncAuthException) {
                 // Token revoked on server
                 db.withTransaction {
-                    dao.setSyncMeta(SyncMeta(META_DEVICE_TOKEN, ""))
-                    dao.setSyncMeta(SyncMeta(META_DEVICE_ID, ""))
+                    dao.deleteSyncMeta(META_DEVICE_TOKEN)
+                    dao.deleteSyncMeta(META_DEVICE_ID)
                 }
                 _syncInfo.value = _syncInfo.value.copy(
                     state = SyncState.ERROR,
@@ -154,9 +249,9 @@ class SyncManager(
         }
     }
 
-    private suspend fun performBootstrap(token: String) {
+    private suspend fun performBootstrap(url: String, token: String) {
         _syncInfo.value = _syncInfo.value.copy(message = "正在拉取完整快照...")
-        val bootstrap = apiClient.getBootstrap(serverUrl, token)
+        val bootstrap = apiClient.getBootstrap(url, token)
 
         val accounts = bootstrap.accounts.map {
             SyncedAccount(
@@ -227,12 +322,12 @@ class SyncManager(
         }
     }
 
-    private suspend fun performIncrementalSync(token: String, startCursor: Long) {
+    private suspend fun performIncrementalSync(url: String, token: String, startCursor: Long) {
         _syncInfo.value = _syncInfo.value.copy(message = "正在拉取增量变更...")
         var cursor = startCursor
         var hasMore = true
         while (hasMore) {
-            val res = apiClient.getChanges(serverUrl, token, cursor, limit = 100)
+            val res = apiClient.getChanges(url, token, cursor, limit = 100)
             if (res.changes.isNotEmpty()) {
                 db.withTransaction {
                     for (ch in res.changes) {
@@ -346,11 +441,12 @@ class SyncManager(
         note: String,
         requestId: String = UUID.randomUUID().toString(),
     ): SyncPaymentResponse = withContext(Dispatchers.IO) {
+        val currentUrl = getActiveServerUrl()
         val token = dao.syncMeta(META_DEVICE_TOKEN)
         if (token.isNullOrBlank()) {
             throw IllegalStateException("设备未连接服务器，离线只读")
         }
-        val healthy = apiClient.checkHealth(serverUrl)
+        val healthy = apiClient.checkHealth(currentUrl)
         if (!healthy) {
             _syncInfo.value = _syncInfo.value.copy(state = SyncState.OFFLINE, isOffline = true)
             throw IllegalStateException("离线只读，请连接网络后还款")
@@ -363,7 +459,7 @@ class SyncManager(
             note = note.ifBlank { null },
             requestId = requestId
         )
-        val res = apiClient.recordPayment(serverUrl, token, req)
+        val res = apiClient.recordPayment(currentUrl, token, req)
 
         // Atomically update local cache with the returned payment & updated statement
         db.withTransaction {
@@ -400,17 +496,18 @@ class SyncManager(
         paymentId: String,
         reason: String
     ): SyncPaymentResponse = withContext(Dispatchers.IO) {
+        val currentUrl = getActiveServerUrl()
         val token = dao.syncMeta(META_DEVICE_TOKEN)
         if (token.isNullOrBlank()) {
             throw IllegalStateException("设备未连接服务器，离线只读")
         }
-        val healthy = apiClient.checkHealth(serverUrl)
+        val healthy = apiClient.checkHealth(currentUrl)
         if (!healthy) {
             _syncInfo.value = _syncInfo.value.copy(state = SyncState.OFFLINE, isOffline = true)
             throw IllegalStateException("离线只读，请连接网络后撤销还款")
         }
 
-        val res = apiClient.revokePayment(serverUrl, token, paymentId, reason)
+        val res = apiClient.revokePayment(currentUrl, token, paymentId, reason)
         db.withTransaction {
             dao.upsertSyncedPayments(listOf(
                 SyncedPayment(
@@ -442,34 +539,37 @@ class SyncManager(
     }
 
     suspend fun triggerMailSync(): MailSyncTriggerResult = withContext(Dispatchers.IO) {
+        val currentUrl = getActiveServerUrl()
         val token = dao.syncMeta(META_DEVICE_TOKEN)
         if (token.isNullOrBlank()) {
             throw IllegalStateException("设备未连接服务器，离线只读")
         }
-        val healthy = apiClient.checkHealth(serverUrl)
+        val healthy = apiClient.checkHealth(currentUrl)
         if (!healthy) {
             _syncInfo.value = _syncInfo.value.copy(state = SyncState.OFFLINE, isOffline = true)
             throw IllegalStateException("离线只读，请连接网络后检查邮件")
         }
-        apiClient.triggerMailSync(serverUrl, token)
+        apiClient.triggerMailSync(currentUrl, token)
     }
 
     suspend fun fetchMailJobs(): List<MailJobDto> = withContext(Dispatchers.IO) {
+        val currentUrl = getActiveServerUrl()
         val token = dao.syncMeta(META_DEVICE_TOKEN)
         if (token.isNullOrBlank()) {
             return@withContext emptyList()
         }
         try {
-            apiClient.getMailJobs(serverUrl, token)
+            apiClient.getMailJobs(currentUrl, token)
         } catch (e: Exception) {
             emptyList()
         }
     }
 
     suspend fun fetchPendingDrafts(): List<StatementDraftDto> = withContext(Dispatchers.IO) {
+        val currentUrl = getActiveServerUrl()
         val token = dao.syncMeta(META_DEVICE_TOKEN) ?: return@withContext emptyList()
         try {
-            apiClient.getDrafts(serverUrl, token, status = "pending_review")
+            apiClient.getDrafts(currentUrl, token, status = "pending_review")
         } catch (e: Exception) {
             emptyList()
         }
@@ -479,15 +579,16 @@ class SyncManager(
         draftId: String,
         req: StatementDraftConfirmRequestDto
     ): StatementDraftConfirmResponseDto = withContext(Dispatchers.IO) {
+        val currentUrl = getActiveServerUrl()
         val token = dao.syncMeta(META_DEVICE_TOKEN)
             ?: throw IllegalStateException("设备未连接服务器，离线只读")
-        val healthy = apiClient.checkHealth(serverUrl)
+        val healthy = apiClient.checkHealth(currentUrl)
         if (!healthy) {
             _syncInfo.value = _syncInfo.value.copy(state = SyncState.OFFLINE, isOffline = true)
             throw IllegalStateException("离线只读，请连接网络后确认草稿")
         }
 
-        val res = apiClient.confirmDraft(serverUrl, token, draftId, req)
+        val res = apiClient.confirmDraft(currentUrl, token, draftId, req)
         val stmt = res.statement
         val ver = res.version
         db.withTransaction {
@@ -525,25 +626,27 @@ class SyncManager(
         draftId: String,
         reason: String
     ): StatementDraftDto = withContext(Dispatchers.IO) {
+        val currentUrl = getActiveServerUrl()
         val token = dao.syncMeta(META_DEVICE_TOKEN)
             ?: throw IllegalStateException("设备未连接服务器，离线只读")
-        val healthy = apiClient.checkHealth(serverUrl)
+        val healthy = apiClient.checkHealth(currentUrl)
         if (!healthy) {
             _syncInfo.value = _syncInfo.value.copy(state = SyncState.OFFLINE, isOffline = true)
             throw IllegalStateException("离线只读，请连接网络后处理草稿")
         }
-        apiClient.rejectDraft(serverUrl, token, draftId, reason)
+        apiClient.rejectDraft(currentUrl, token, draftId, reason)
     }
 
     suspend fun parseAllPendingDrafts(): List<StatementDraftDto> = withContext(Dispatchers.IO) {
+        val currentUrl = getActiveServerUrl()
         val token = dao.syncMeta(META_DEVICE_TOKEN)
             ?: throw IllegalStateException("设备未连接服务器，离线只读")
-        val healthy = apiClient.checkHealth(serverUrl)
+        val healthy = apiClient.checkHealth(currentUrl)
         if (!healthy) {
             _syncInfo.value = _syncInfo.value.copy(state = SyncState.OFFLINE, isOffline = true)
             throw IllegalStateException("离线只读，请连接网络后解析邮件")
         }
-        apiClient.parseAllPending(serverUrl, token)
+        apiClient.parseAllPending(currentUrl, token)
     }
 
     private fun formatNow(): String {

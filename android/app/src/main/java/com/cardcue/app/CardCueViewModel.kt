@@ -64,6 +64,59 @@ class CardCueViewModel(private val repository: BillRepository) : ViewModel() {
         }
     }
 
+    fun pairDevice(
+        serverUrl: String,
+        pairingCode: String,
+        deviceName: String? = null,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val sync = repository.syncManager
+            if (sync == null) {
+                onError("同步管理器未初始化")
+                return@launch
+            }
+            try {
+                mutableState.value = mutableState.value.copy(busy = true)
+                sync.pairWithCode(serverUrl, pairingCode, deviceName)
+                loadPendingDrafts()
+                eventChannel.send("设备配对成功！账单已同步")
+                onSuccess()
+            } catch (e: Exception) {
+                val msg = when (e) {
+                    is SyncApiException -> e.message ?: "配对请求失败 (${e.statusCode})"
+                    else -> e.message ?: "配对失败"
+                }
+                onError(msg)
+                eventChannel.send("配对失败: $msg")
+            } finally {
+                mutableState.value = mutableState.value.copy(busy = false)
+            }
+        }
+    }
+
+    fun unpairDevice(onComplete: () -> Unit = {}) {
+        viewModelScope.launch {
+            val sync = repository.syncManager
+            if (sync == null) {
+                onComplete()
+                return@launch
+            }
+            try {
+                mutableState.value = mutableState.value.copy(busy = true)
+                sync.unpairDevice()
+                _pendingDrafts.value = emptyList()
+                eventChannel.send("已解除配对，恢复本地演示模式")
+                onComplete()
+            } catch (e: Exception) {
+                eventChannel.send("解除配对失败: ${e.message ?: "未知错误"}")
+            } finally {
+                mutableState.value = mutableState.value.copy(busy = false)
+            }
+        }
+    }
+
     fun syncNow() {
         viewModelScope.launch {
             val sync = repository.syncManager

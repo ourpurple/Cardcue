@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import type { TableProps } from 'antd';
 import {
   Table,
   Button,
@@ -54,6 +55,8 @@ export const Statements: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<'all' | 'unpaid' | 'paid'>('all');
   const [accountFilter, setAccountFilter] = useState<string | undefined>(undefined);
   const [currencyFilter, setCurrencyFilter] = useState<string | undefined>(undefined);
+  const [sortField, setSortField] = useState<'due_date' | 'statement_date'>('due_date');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [accounts, setAccounts] = useState<BankAccount[]>([]);
 
   // Drawer detail state
@@ -93,6 +96,8 @@ export const Statements: React.FC = () => {
         page,
         size: pageSize,
         status: statusFilter,
+        sort_by: sortField,
+        sort_order: sortOrder,
       };
       if (accountFilter) params.account_id = accountFilter;
       if (currencyFilter) params.currency = currencyFilter;
@@ -112,7 +117,7 @@ export const Statements: React.FC = () => {
 
   useEffect(() => {
     fetchStatements();
-  }, [page, pageSize, statusFilter, accountFilter, currencyFilter]);
+  }, [page, pageSize, statusFilter, accountFilter, currencyFilter, sortField, sortOrder]);
 
   const loadDetail = async (id: string) => {
     setDetailLoading(true);
@@ -264,7 +269,36 @@ export const Statements: React.FC = () => {
     }
   };
 
-  const columns = [
+  const handleTableChange = (newPagination: any, _filters: any, sorter: any) => {
+    if (newPagination.pageSize && newPagination.pageSize !== pageSize) {
+      setPageSize(newPagination.pageSize);
+      setPage(1);
+    } else if (newPagination.current && newPagination.current !== page) {
+      setPage(newPagination.current);
+    }
+
+    if (!Array.isArray(sorter) && sorter && (sorter.field || sorter.columnKey)) {
+      const field = (sorter.field || sorter.columnKey) as 'due_date' | 'statement_date';
+      if (field === 'due_date' || field === 'statement_date') {
+        if (sorter.order) {
+          const order = sorter.order === 'descend' ? 'desc' : 'asc';
+          if (field !== sortField || order !== sortOrder) {
+            setSortField(field);
+            setSortOrder(order);
+            setPage(1);
+          }
+        } else {
+          if (sortField !== 'due_date' || sortOrder !== 'asc') {
+            setSortField('due_date');
+            setSortOrder('asc');
+            setPage(1);
+          }
+        }
+      }
+    }
+  };
+
+  const columns: TableProps<StatementListItem>['columns'] = [
     {
       title: '银行与账户',
       key: 'bank',
@@ -285,13 +319,17 @@ export const Statements: React.FC = () => {
       title: '账单日',
       dataIndex: 'statement_date',
       key: 'statement_date',
-      width: 120,
+      width: 130,
+      sorter: true,
+      sortOrder: sortField === 'statement_date' ? (sortOrder === 'asc' ? 'ascend' as const : 'descend' as const) : null,
     },
     {
       title: '到期还款日',
       dataIndex: 'due_date',
       key: 'due_date',
-      width: 120,
+      width: 140,
+      sorter: true,
+      sortOrder: sortField === 'due_date' ? (sortOrder === 'asc' ? 'ascend' as const : 'descend' as const) : null,
       render: (date: string, record: StatementListItem) => {
         const isOverdue = !record.is_paid && new Date(date).getTime() < new Date().setHours(0, 0, 0, 0);
         return (
@@ -448,15 +486,12 @@ export const Statements: React.FC = () => {
           columns={columns}
           dataSource={data}
           loading={loading}
+          onChange={handleTableChange}
           pagination={{
             current: page,
             pageSize,
             total,
             showSizeChanger: true,
-            onChange: (p, ps) => {
-              setPage(p);
-              setPageSize(ps);
-            },
           }}
         />
       </Card>

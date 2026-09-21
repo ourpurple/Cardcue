@@ -28,9 +28,10 @@ class SyncApiClient(private val timeoutMs: Int = 15_000) {
         }
     }
 
-    fun pairDevice(baseUrl: String, deviceName: String): PairResponse {
+    fun pairDevice(baseUrl: String, deviceName: String, pairingCode: String): PairResponse {
         val payload = JSONObject().apply {
             put("name", deviceName)
+            put("pairing_code", pairingCode)
         }
         val (code, body) = executeRequest(
             urlStr = "$baseUrl/v1/devices/pair",
@@ -38,7 +39,33 @@ class SyncApiClient(private val timeoutMs: Int = 15_000) {
             jsonBody = payload.toString()
         )
         if (code != 200 && code != 201) {
-            throw SyncApiException(code, "Device pair failed ($code): $body")
+            val errorDetail = try {
+                val json = JSONObject(body)
+                val detailObj = json.opt("detail")
+                when (detailObj) {
+                    is String -> detailObj
+                    is JSONArray -> {
+                        val messages = mutableListOf<String>()
+                        for (i in 0 until detailObj.length()) {
+                            val item = detailObj.optJSONObject(i)
+                            if (item != null) {
+                                val field = item.optJSONArray("loc")?.let { loc ->
+                                    (0 until loc.length()).map { loc.getString(it) }.filter { it != "body" }.joinToString(".")
+                                } ?: ""
+                                val msg = item.optString("msg", "")
+                                if (field.isNotBlank()) messages.add("$field: $msg") else messages.add(msg)
+                            } else {
+                                messages.add(detailObj.getString(i))
+                            }
+                        }
+                        messages.joinToString("; ")
+                    }
+                    else -> body
+                }
+            } catch (_: Exception) {
+                body
+            }
+            throw SyncApiException(code, if (errorDetail.isNotBlank()) errorDetail else "设备配对失败 ($code)")
         }
         val json = JSONObject(body)
         return PairResponse(

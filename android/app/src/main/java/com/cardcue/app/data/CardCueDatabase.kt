@@ -142,6 +142,7 @@ interface CardCueDao {
 
     @Query("SELECT value FROM sync_meta WHERE `key` = :key") suspend fun syncMeta(key: String): String?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun setSyncMeta(item: SyncMeta)
+    @Query("DELETE FROM sync_meta WHERE `key` = :key") suspend fun deleteSyncMeta(key: String)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertSyncedAccounts(items: List<SyncedAccount>)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertSyncedCards(items: List<SyncedCard>)
