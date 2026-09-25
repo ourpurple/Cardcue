@@ -32,6 +32,7 @@ import {
 import { statementsApi, accountsApi } from '../api';
 import { CurrencyAmount, centsToYuanString, yuanStringToCents } from '../components/CurrencyAmount';
 import { StatementListItem, StatementDetailData, BankAccount } from '../types';
+import { getBankShort } from '../utils/bankDisplay';
 
 const { Text, Title, Paragraph } = Typography;
 
@@ -302,18 +303,23 @@ export const Statements: React.FC = () => {
     {
       title: '银行与账户',
       key: 'bank',
-      render: (_: any, record: StatementListItem) => (
-        <div>
-          <Text strong>{record.bank}</Text>
-          {record.account_alias && (
-            <div>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {record.account_alias}
-              </Text>
-            </div>
-          )}
-        </div>
-      ),
+      render: (_: any, record: StatementListItem) => {
+        const bankShort = getBankShort(record.bank);
+        const tails = (record.card_tails || []).join(' / ');
+        const title = [bankShort, record.holder, tails].filter(Boolean).join(' ');
+        return (
+          <div>
+            <Text strong style={{ fontSize: 16 }}>{title || record.bank}</Text>
+            {record.account_alias && (
+              <div>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {record.account_alias}
+                </Text>
+              </div>
+            )}
+          </div>
+        );
+      },
     },
     {
       title: '账单日',
@@ -459,7 +465,7 @@ export const Statements: React.FC = () => {
                 setPage(1);
               }}
               options={accounts.map((a) => ({
-                label: a.alias ? `${a.bank || a.bank_name} (${a.alias})` : a.bank || a.bank_name || a.id,
+                label: (() => { const bs = getBankShort(a.bank || a.bank_name); const h = (a as any).holder || ''; return a.alias ? `${bs} ${h} (${a.alias})`.trim() : bs || a.bank || a.bank_name || a.id; })(),
                 value: a.id,
               }))}
             />
@@ -563,7 +569,7 @@ export const Statements: React.FC = () => {
 
             <Paragraph>
               <Text strong>银行账户: </Text>
-              {currentDetail.bank} {currentDetail.account_alias && `(${currentDetail.account_alias})`}
+              {(() => { const bs = getBankShort(currentDetail.bank); const t = (currentDetail.card_tails || []).join(' / '); return [bs, currentDetail.holder, t].filter(Boolean).join(' ') || currentDetail.bank; })()}{currentDetail.account_alias && ` (${currentDetail.account_alias})`}
               <Divider type="vertical" />
               <Text strong>账单日: </Text>
               {currentDetail.statement_date}
@@ -721,7 +727,7 @@ export const Statements: React.FC = () => {
         {paymentTarget && (
           <Form form={paymentForm} layout="vertical">
             <Paragraph>
-              正在为 <Text strong>{paymentTarget.bank}</Text> 账单记录还款。当前剩余应还金额:{' '}
+              正在为 <Text strong>{(() => { const bs = getBankShort(paymentTarget.bank); const t = (paymentTarget.card_tails || []).join(' / '); return [bs, paymentTarget.holder, t].filter(Boolean).join(' ') || paymentTarget.bank; })()}</Text> 账单记录还款。当前剩余应还金额:{' '}
               <CurrencyAmount
                 cents={paymentTarget.remaining_minor}
                 currency={paymentTarget.currency}

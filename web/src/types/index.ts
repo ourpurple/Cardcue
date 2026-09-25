@@ -93,6 +93,8 @@ export interface StatementListItem {
   account_id: string;
   bank: string;
   account_alias: string | null;
+  holder?: string | null;
+  card_tails?: string[];
   currency: string;
   statement_date: string;
   due_date: string;

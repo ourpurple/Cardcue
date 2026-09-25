@@ -541,7 +541,7 @@ async def list_statements(
     results = list((await session.execute(query)).all())
 
     items = []
-    for stmt, bank, alias in results:
+    for stmt, bank, alias, holder in results:
         cur_ver = None
         for v in stmt.versions:
             if v.id == stmt.current_version_id:
@@ -558,11 +558,18 @@ async def list_statements(
         if status == "paid" and remaining > 0:
             continue
 
+        # Fetch card tails for this account
+        acct_cards = (await session.execute(
+            select(Card.tail).where(Card.account_id == stmt.account_id, Card.status == "active")
+        )).scalars().all()
+
         items.append({
             "id": str(stmt.id),
             "account_id": str(stmt.account_id),
             "bank": bank,
             "account_alias": alias,
+            "holder": holder,
+            "card_tails": list(acct_cards),
             "currency": stmt.currency,
             "statement_date": stmt.statement_date,
             "due_date": stmt.due_date,
@@ -586,7 +593,7 @@ async def get_statement_detail(
     session: AsyncSession = Depends(get_session),
 ):
     stmt_row = (await session.execute(
-        select(Statement, Account.bank, Account.alias)
+        select(Statement, Account.bank, Account.alias, Account.holder)
         .join(Account, Statement.account_id == Account.id)
         .options(
             selectinload(Statement.versions),
@@ -597,7 +604,7 @@ async def get_statement_detail(
     if not stmt_row:
         raise HTTPException(404, "账单不存在")
 
-    stmt, bank, alias = stmt_row
+    stmt, bank, alias, holder = stmt_row
     cur_ver = None
     for v in stmt.versions:
         if v.id == stmt.current_version_id:
@@ -626,11 +633,17 @@ async def get_statement_detail(
             "evidence": draft_row.evidence,
         }
 
+    detail_cards = (await session.execute(
+        select(Card.tail).where(Card.account_id == stmt.account_id, Card.status == "active")
+    )).scalars().all()
+
     return {
         "id": str(stmt.id),
         "account_id": str(stmt.account_id),
         "bank": bank,
         "account_alias": alias,
+        "holder": holder,
+        "card_tails": list(detail_cards),
         "currency": stmt.currency,
         "statement_date": stmt.statement_date,
         "due_date": stmt.due_date,
