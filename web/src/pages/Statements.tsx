@@ -305,11 +305,33 @@ export const Statements: React.FC = () => {
       key: 'bank',
       render: (_: any, record: StatementListItem) => {
         const bankShort = getBankShort(record.bank);
-        const tails = (record.card_tails || []).join(' / ');
-        const title = [bankShort, record.holder, tails].filter(Boolean).join(' ');
+        const tails = record.card_tails || [];
+        if (tails.length <= 1) {
+          // 0 or 1 card: single line
+          const title = [bankShort, record.holder, tails[0]].filter(Boolean).join(' ');
+          return (
+            <div>
+              <Text strong style={{ fontSize: 16 }}>{title || record.bank}</Text>
+              {record.account_alias && (
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {record.account_alias}
+                  </Text>
+                </div>
+              )}
+            </div>
+          );
+        }
+        // Multiple cards: one line per card tail
         return (
           <div>
-            <Text strong style={{ fontSize: 16 }}>{title || record.bank}</Text>
+            {tails.map((t, i) => (
+              <div key={i}>
+                <Text strong style={{ fontSize: 16 }}>
+                  {[bankShort, record.holder, t].filter(Boolean).join(' ')}
+                </Text>
+              </div>
+            ))}
             {record.account_alias && (
               <div>
                 <Text type="secondary" style={{ fontSize: 12 }}>
@@ -569,7 +591,7 @@ export const Statements: React.FC = () => {
 
             <Paragraph>
               <Text strong>银行账户: </Text>
-              {(() => { const bs = getBankShort(currentDetail.bank); const t = (currentDetail.card_tails || []).join(' / '); return [bs, currentDetail.holder, t].filter(Boolean).join(' ') || currentDetail.bank; })()}{currentDetail.account_alias && ` (${currentDetail.account_alias})`}
+              {(() => { const bs = getBankShort(currentDetail.bank); const tails = currentDetail.card_tails || []; if (tails.length <= 1) return [bs, currentDetail.holder, tails[0]].filter(Boolean).join(' ') || currentDetail.bank; return tails.map(t => [bs, currentDetail.holder, t].filter(Boolean).join(' ')).join('、'); })()}{currentDetail.account_alias && ` (${currentDetail.account_alias})`}
               <Divider type="vertical" />
               <Text strong>账单日: </Text>
               {currentDetail.statement_date}
@@ -727,7 +749,7 @@ export const Statements: React.FC = () => {
         {paymentTarget && (
           <Form form={paymentForm} layout="vertical">
             <Paragraph>
-              正在为 <Text strong>{(() => { const bs = getBankShort(paymentTarget.bank); const t = (paymentTarget.card_tails || []).join(' / '); return [bs, paymentTarget.holder, t].filter(Boolean).join(' ') || paymentTarget.bank; })()}</Text> 账单记录还款。当前剩余应还金额:{' '}
+              正在为 <Text strong>{(() => { const bs = getBankShort(paymentTarget.bank); const tails = paymentTarget.card_tails || []; if (tails.length <= 1) return [bs, paymentTarget.holder, tails[0]].filter(Boolean).join(' ') || paymentTarget.bank; return tails.map(t => [bs, paymentTarget.holder, t].filter(Boolean).join(' ')).join('、'); })()}</Text> 账单记录还款。当前剩余应还金额:{' '}
               <CurrencyAmount
                 cents={paymentTarget.remaining_minor}
                 currency={paymentTarget.currency}
