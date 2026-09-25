@@ -52,6 +52,7 @@ export interface BankAccount {
   bank_name?: string;
   account_name?: string;
   alias?: string | null;
+  holder?: string | null;
   reference?: string | null;
   currency?: string;
   credit_limit_cents?: number;

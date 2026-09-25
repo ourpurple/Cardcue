@@ -207,6 +207,7 @@ async def list_accounts(session: AsyncSession = Depends(get_session)):
         "id": str(a.id),
         "bank": a.bank,
         "alias": a.alias,
+        "holder": a.holder,
         "reference": a.reference,
         "status": a.status,
         "revision": a.revision,
@@ -238,6 +239,7 @@ async def create_account(
         "id": str(acct.id),
         "bank": acct.bank,
         "alias": acct.alias,
+        "holder": acct.holder,
         "reference": acct.reference,
         "status": acct.status,
         "revision": acct.revision,
@@ -266,6 +268,8 @@ async def update_account(
         acct.bank = data.bank
     if data.reference is not None:
         acct.reference = data.reference
+    if data.holder is not None:
+        acct.holder = data.holder
     acct.alias = data.alias
     acct.status = data.status
     acct.revision += 1
@@ -285,6 +289,7 @@ async def update_account(
         "id": str(acct.id),
         "bank": acct.bank,
         "alias": acct.alias,
+        "holder": acct.holder,
         "reference": acct.reference,
         "status": acct.status,
         "revision": acct.revision,

@@ -41,6 +41,7 @@ class Account(Base):
     bank: Mapped[str] = mapped_column(String(100), nullable=False)
     alias: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="User-chosen display name")
     reference: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="Account reference from bank email")
+    holder: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="Card holder name")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

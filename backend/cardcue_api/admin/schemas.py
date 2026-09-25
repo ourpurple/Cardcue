@@ -21,6 +21,7 @@ class AccountEdit(Strict):
     expected_revision: int = Field(ge=1)
     bank: str | None = Field(None, min_length=1, max_length=100)
     alias: str | None = Field(None, max_length=100)
+    holder: str | None = Field(None, max_length=50)
     reference: str | None = Field(None, max_length=100)
     status: Literal["active", "archived"] = "active"
 

@@ -1,4 +1,4 @@
-﻿"""Pydantic schemas for API input/output. Separate from SQLAlchemy models."""
+"""Pydantic schemas for API input/output. Separate from SQLAlchemy models."""
 
 import uuid
 from datetime import date, datetime
@@ -13,6 +13,7 @@ class AccountCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     bank: str = Field(min_length=1, max_length=100)
     alias: str | None = Field(default=None, max_length=100)
+    holder: str | None = Field(default=None, max_length=50)
     reference: str | None = Field(default=None, max_length=100)
 
 
@@ -28,6 +29,7 @@ class AccountOut(BaseModel):
     id: uuid.UUID
     bank: str
     alias: str | None
+    holder: str | None
     reference: str | None
     status: str
     created_at: datetime

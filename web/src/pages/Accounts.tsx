@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   Table,
   Button,
@@ -27,6 +27,92 @@ import { accountsApi } from '../api';
 import { BankAccount, AccountCard } from '../types';
 
 const { Text } = Typography;
+
+/** Bank full name -> abbreviation mapping */
+const BANK_SHORT: Record<string, string> = {
+  '交通银行': '交行',
+  '华夏银行': '华夏',
+  '招商银行': '招商',
+  '民生银行': '民生',
+  '浦发银行': '浦发',
+  '广发银行': '广发',
+  '中信银行': '中信',
+  '农业银行': '农行',
+  '建设银行': '建行',
+  '中国银行': '中行',
+  '邮储银行': '邮储',
+  '中国邮政储蓄银行': '邮储',
+  '工商银行': '工行',
+  '兴业银行': '兴业',
+  '光大银行': '光大',
+  '平安银行': '平安',
+  '北京银行': '北京',
+  '上海银行': '上海',
+};
+
+/**
+ * Banks where a single holder may have MULTIPLE separate billing accounts.
+ * Each account is shown as its own row (never merged).
+ */
+const MULTI_ACCOUNT_BANKS = new Set([
+  '广发', '中信', '交行', '农行', '建行', '中行', '邮储', '工行', '兴业',
+]);
+
+/**
+ * Banks where a single holder typically has only ONE billing account.
+ * All accounts for the same (bank, holder) are merged into a single row.
+ */
+const SINGLE_ACCOUNT_BANKS = new Set([
+  '浦发', '华夏', '招商', '民生',
+]);
+
+function getBankShort(bank: string | undefined): string {
+  if (!bank) return '';
+  if (BANK_SHORT[bank]) return BANK_SHORT[bank];
+  // Try partial match
+  for (const [full, short] of Object.entries(BANK_SHORT)) {
+    if (bank.includes(full) || bank.includes(short)) return short;
+  }
+  // Fallback: return first 2 chars
+  return bank.length > 4 ? bank.slice(0, 2) : bank;
+}
+
+/** Check whether a bank abbreviation belongs to the multi-account group */
+function isMultiAccountBank(bankShort: string): boolean {
+  return MULTI_ACCOUNT_BANKS.has(bankShort);
+}
+
+/** Check whether a bank abbreviation belongs to the single-account group */
+function isSingleAccountBank(bankShort: string): boolean {
+  return SINGLE_ACCOUNT_BANKS.has(bankShort);
+}
+
+/**
+ * Represents a display row: either a single account (multi-account bank)
+ * or a merged group of accounts (single-account-per-holder bank).
+ */
+interface DisplayRow {
+  /** Unique key for table */
+  key: string;
+  /** Bank short name */
+  bankShort: string;
+  /** Bank full name */
+  bankFull: string;
+  /** Card holder name */
+  holder: string;
+  /** Whether this is a merged row (multiple accounts under one holder at one bank) */
+  merged: boolean;
+  /** The account(s) behind this row */
+  accounts: BankAccount[];
+  /** All cards across all accounts in this row */
+  allCards: AccountCard[];
+  /** Primary display text: "银行缩写 持卡人 尾号" */
+  displayTitle: string;
+  /** Status of the first/primary account */
+  status: string;
+  /** Created at of earliest account */
+  created_at: string;
+}
 
 export const Accounts: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
@@ -67,6 +153,86 @@ export const Accounts: React.FC = () => {
     fetchAccounts();
   }, []);
 
+  // ---- Build display rows ----
+  const displayRows = useMemo<DisplayRow[]>(() => {
+    // Group accounts by (bank, holder)
+    const groups = new Map<string, BankAccount[]>();
+    for (const acct of accounts) {
+      const bank = acct.bank || acct.bank_name || '';
+      const holder = acct.holder || '';
+      const key = `${bank}||${holder}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(acct);
+    }
+
+    const rows: DisplayRow[] = [];
+    for (const [, group] of groups) {
+      const bank = group[0].bank || group[0].bank_name || '';
+      const holder = group[0].holder || '';
+      const bankShort = getBankShort(bank);
+
+      // Decide merge strategy based on bank type:
+      // - Multi-account banks: always show each account separately
+      // - Single-account banks: always merge into one row
+      // - Unknown banks: merge if only 1 account, separate if >1
+      const shouldMerge = isSingleAccountBank(bankShort)
+        ? true
+        : isMultiAccountBank(bankShort)
+          ? false
+          : group.length === 1;
+
+      if (shouldMerge) {
+        // Merge all accounts for this bank+holder into one row
+        const allCards: AccountCard[] = [];
+        for (const acct of group) {
+          for (const card of (acct.cards || [])) {
+            allCards.push(card);
+          }
+        }
+        const tailParts = allCards.map(c => c.tail || c.card_last4 || '').filter(Boolean);
+        const tailDisplay = tailParts.length > 0 ? tailParts.join(' / ') : '';
+        const title = [bankShort, holder, tailDisplay].filter(Boolean).join(' ');
+
+        rows.push({
+          key: group.map(a => a.id).join('__'),
+          bankShort,
+          bankFull: bank,
+          holder,
+          merged: group.length > 1,
+          accounts: group,
+          allCards,
+          displayTitle: title || group[0].alias || bank,
+          status: group[0].status,
+          created_at: group.reduce((earliest, a) =>
+            a.created_at < earliest ? a.created_at : earliest, group[0].created_at),
+        });
+      } else {
+        // Show each account as a separate row
+        for (const acct of group) {
+          const cards = acct.cards || [];
+          const tailParts = cards.map(c => c.tail || c.card_last4 || '').filter(Boolean);
+          const tailDisplay = tailParts.length > 0 ? tailParts.join(' / ') : '';
+          const title = [bankShort, holder, tailDisplay].filter(Boolean).join(' ');
+
+          rows.push({
+            key: acct.id,
+            bankShort,
+            bankFull: bank,
+            holder,
+            merged: false,
+            accounts: [acct],
+            allCards: cards,
+            displayTitle: title || acct.alias || bank,
+            status: acct.status,
+            created_at: acct.created_at,
+          });
+        }
+      }
+    }
+
+    return rows;
+  }, [accounts]);
+
   // Account Form Handlers
   const openCreateAccount = () => {
     setEditingAccount(null);
@@ -83,6 +249,7 @@ export const Accounts: React.FC = () => {
     accountForm.setFieldsValue({
       bank: record.bank || record.bank_name,
       alias: record.alias || record.account_name,
+      holder: record.holder || '',
       reference: record.reference,
       status: record.status || 'active',
     });
@@ -98,6 +265,7 @@ export const Accounts: React.FC = () => {
         await accountsApi.updateAccount(editingAccount.id, {
           bank: values.bank?.trim(),
           alias: values.alias?.trim() || null,
+          holder: values.holder?.trim() || null,
           reference: values.reference?.trim() || null,
           status: values.status || editingAccount.status || 'active',
           expected_revision: editingAccount.revision,
@@ -107,6 +275,7 @@ export const Accounts: React.FC = () => {
         await accountsApi.createAccount({
           bank: values.bank.trim(),
           alias: values.alias?.trim() || null,
+          holder: values.holder?.trim() || null,
           reference: values.reference?.trim() || null,
         });
         message.success('账户新建成功');
@@ -139,7 +308,7 @@ export const Accounts: React.FC = () => {
   const handleDeleteAccount = async (record: BankAccount) => {
     try {
       await accountsApi.deleteAccount(record.id);
-      message.success(`账户「${record.alias || record.bank || record.account_name}」已彻底删除`);
+      message.success('账户已彻底删除');
       fetchAccounts();
     } catch (err: any) {
       message.error(err?.response?.data?.detail || '删除账户失败');
@@ -149,13 +318,12 @@ export const Accounts: React.FC = () => {
   const handleDeleteCard = async (card: AccountCard) => {
     try {
       await accountsApi.deleteCard(card.id);
-      message.success(`卡片「${card.display_name || card.card_alias || '尾号 ' + (card.tail || card.card_last4)}」已彻底删除`);
+      message.success(`卡片「尾号 ${card.tail || card.card_last4}」已彻底删除`);
       fetchAccounts();
     } catch (err: any) {
       message.error(err?.response?.data?.detail || '删除卡片失败');
     }
   };
-
 
   // Card Add Handlers
   const openAddCard = (accountId: string) => {
@@ -235,8 +403,10 @@ export const Accounts: React.FC = () => {
   };
 
   // Expanded Cards Table
-  const expandedRowRender = (accountRecord: BankAccount) => {
-    const cards = accountRecord.cards || [];
+  const expandedRowRender = (row: DisplayRow) => {
+    // For merged rows, show cards from ALL accounts
+    const allAccounts = row.accounts;
+    const cards = row.allCards;
     const cardColumns = [
       {
         title: '卡号尾号',
@@ -254,6 +424,14 @@ export const Accounts: React.FC = () => {
           <Text strong>{card.display_name || card.card_alias || '信用卡'}</Text>
         ),
       },
+      ...(row.merged ? [{
+        title: '所属账户',
+        key: 'account_alias',
+        render: (_: any, card: AccountCard) => {
+          const parentAcct = allAccounts.find(a => a.id === card.account_id);
+          return <Text type="secondary">{parentAcct?.alias || parentAcct?.reference || '-'}</Text>;
+        },
+      }] : []),
       {
         title: '状态',
         key: 'status',
@@ -324,14 +502,30 @@ export const Accounts: React.FC = () => {
               名下绑定的信用卡（共 {cards.length} 张）
             </Text>
           </Space>
-          <Button
-            size="small"
-            type="dashed"
-            icon={<PlusOutlined />}
-            onClick={() => openAddCard(accountRecord.id)}
-          >
-            绑定新卡片
-          </Button>
+          {!row.merged ? (
+            <Button
+              size="small"
+              type="dashed"
+              icon={<PlusOutlined />}
+              onClick={() => openAddCard(row.accounts[0].id)}
+            >
+              绑定新卡片
+            </Button>
+          ) : (
+            <Space>
+              {allAccounts.map(a => (
+                <Button
+                  key={a.id}
+                  size="small"
+                  type="dashed"
+                  icon={<PlusOutlined />}
+                  onClick={() => openAddCard(a.id)}
+                >
+                  绑定到 {a.alias || a.reference || '账户'}
+                </Button>
+              ))}
+            </Space>
+          )}
         </div>
         <Table
           columns={cardColumns}
@@ -347,29 +541,42 @@ export const Accounts: React.FC = () => {
 
   const accountColumns = [
     {
-      title: '账户别名 / 银行',
+      title: '银行 / 持卡人 / 卡号',
       key: 'name',
-      render: (_: any, r: BankAccount) => (
-        <Space direction="vertical" size={2}>
-          <Text strong style={{ fontSize: 14 }}>
-            {r.alias || r.bank || r.account_name}
-          </Text>
-          <Space size={8}>
-            <Tag color="blue">{r.bank || r.bank_name}</Tag>
-            {r.reference ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                参考编号: {r.reference}
-              </Text>
-            ) : null}
+      render: (_: any, row: DisplayRow) => {
+        const acct = row.accounts[0];
+        return (
+          <Space direction="vertical" size={2}>
+            <Text strong style={{ fontSize: 16 }}>
+              {row.displayTitle}
+            </Text>
+            <Space size={8}>
+              <Tag color="blue">{row.bankShort}</Tag>
+              {row.merged ? (
+                <Tag color="orange" style={{ fontSize: 11 }}>
+                  {row.accounts.length} 个账户合并
+                </Tag>
+              ) : null}
+              {acct.alias ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {acct.alias}
+                </Text>
+              ) : null}
+              {acct.reference ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  参考编号: {acct.reference}
+                </Text>
+              ) : null}
+            </Space>
           </Space>
-        </Space>
-      ),
+        );
+      },
     },
     {
       title: '名下卡片',
       key: 'cards_count',
-      render: (_: any, r: any) => {
-        const count = r.cards ? r.cards.length : (r.cards_count ?? 0);
+      render: (_: any, row: DisplayRow) => {
+        const count = row.allCards.length;
         return (
           <Tag color="geekblue" icon={<CreditCardOutlined />}>
             {count} 张信用卡
@@ -379,64 +586,67 @@ export const Accounts: React.FC = () => {
     },
     {
       title: '账户状态',
-      dataIndex: 'status',
       key: 'status',
-      render: (s: string) => (s === 'active' ? <Tag color="success">正常</Tag> : <Tag color="default">已归档</Tag>),
+      render: (_: any, row: DisplayRow) =>
+        row.status === 'active' ? <Tag color="success">正常</Tag> : <Tag color="default">已归档</Tag>,
     },
     {
       title: '创建时间',
-      dataIndex: 'created_at',
       key: 'created_at',
-      render: (t: string) => (t ? new Date(t).toLocaleString('zh-CN') : '-'),
+      render: (_: any, row: DisplayRow) =>
+        row.created_at ? new Date(row.created_at).toLocaleString('zh-CN') : '-',
     },
     {
       title: '操作',
       key: 'actions',
-      render: (_: any, r: BankAccount) => (
-        <Space>
-          <Button size="small" icon={<EditOutlined />} onClick={() => openEditAccount(r)}>
-            编辑
-          </Button>
-          <Button size="small" icon={<PlusOutlined />} onClick={() => openAddCard(r.id)}>
-            加卡
-          </Button>
-          {r.status === 'active' ? (
-            <Popconfirm
-              title="确定归档此账户吗？归档后不会参与新邮件匹配，但保留历史账单。"
-              onConfirm={() => handleToggleAccountStatus(r, 'archived')}
-            >
-              <Button size="small">
-                归档
-              </Button>
-            </Popconfirm>
-          ) : (
-            <Popconfirm
-              title="确定恢复此归档账户吗？"
-              onConfirm={() => handleToggleAccountStatus(r, 'active')}
-            >
-              <Button size="small" style={{ color: '#52c41a' }}>
-                恢复
-              </Button>
-            </Popconfirm>
-          )}
-          <Popconfirm
-            title="确定彻底删除此银行账户吗？"
-            description={
-              (r.cards?.length || 0) > 0
-                ? `将连同名下 ${r.cards?.length} 张信用卡一并彻底删除。若已有正式账单将无法删除。`
-                : '彻底删除后不可恢复。若已有正式账单将无法删除。'
-            }
-            onConfirm={() => handleDeleteAccount(r)}
-            okText="彻底删除"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-          >
-            <Button size="small" danger icon={<DeleteOutlined />}>
-              删除
+      render: (_: any, row: DisplayRow) => {
+        const r = row.accounts[0];
+        return (
+          <Space>
+            <Button size="small" icon={<EditOutlined />} onClick={() => openEditAccount(r)}>
+              编辑
             </Button>
-          </Popconfirm>
-        </Space>
-      ),
+            <Button size="small" icon={<PlusOutlined />} onClick={() => openAddCard(r.id)}>
+              加卡
+            </Button>
+            {r.status === 'active' ? (
+              <Popconfirm
+                title="确定归档此账户吗？归档后不会参与新邮件匹配，但保留历史账单。"
+                onConfirm={() => handleToggleAccountStatus(r, 'archived')}
+              >
+                <Button size="small">
+                  归档
+                </Button>
+              </Popconfirm>
+            ) : (
+              <Popconfirm
+                title="确定恢复此归档账户吗？"
+                onConfirm={() => handleToggleAccountStatus(r, 'active')}
+              >
+                <Button size="small" style={{ color: '#52c41a' }}>
+                  恢复
+                </Button>
+              </Popconfirm>
+            )}
+            <Popconfirm
+              title="确定彻底删除此银行账户吗？"
+              description={
+                (r.cards?.length || 0) > 0
+                  ? `将连同名下 ${r.cards?.length} 张信用卡一并彻底删除。若已有正式账单将无法删除。`
+                  : '彻底删除后不可恢复。若已有正式账单将无法删除。'
+              }
+              onConfirm={() => handleDeleteAccount(r)}
+              okText="彻底删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />}>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        );
+      },
     },
   ];
 
@@ -461,9 +671,9 @@ export const Accounts: React.FC = () => {
         }
       >
         <Table
-          dataSource={accounts}
+          dataSource={displayRows}
           columns={accountColumns}
-          rowKey="id"
+          rowKey="key"
           loading={loading}
           expandable={{ expandedRowRender }}
           pagination={{ pageSize: 15, showTotal: (total) => `共 ${total} 个银行账户` }}
@@ -486,6 +696,14 @@ export const Accounts: React.FC = () => {
             rules={[{ required: true, message: '请输入发卡行名称，如：招商银行、中国银行、中信银行' }]}
           >
             <Input placeholder="发卡行名称，如：招商银行" />
+          </Form.Item>
+
+          <Form.Item
+            name="holder"
+            label="持卡人姓名"
+            tooltip="持卡人真实姓名，用于在列表中醒目显示"
+          >
+            <Input placeholder="如：牛鋆辉、杨小宾" />
           </Form.Item>
 
           <Form.Item

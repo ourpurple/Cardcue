@@ -55,7 +55,7 @@ class BillingService:
     # ---- Account ----
 
     async def create_account(self, session: AsyncSession, data: AccountCreate) -> Account:
-        acct = Account(bank=data.bank, alias=data.alias, reference=data.reference)
+        acct = Account(bank=data.bank, alias=data.alias, holder=data.holder, reference=data.reference)
         session.add(acct)
         await session.flush()
         await session.refresh(acct)
