@@ -207,25 +207,46 @@ export const Accounts: React.FC = () => {
             a.created_at < earliest ? a.created_at : earliest, group[0].created_at),
         });
       } else {
-        // Show each account as a separate row
+        // Multi-account bank: show each card as its own row.
+        // If an account has multiple cards, each card becomes a separate row
+        // so the user sees e.g. "广发 牛鋆辉 2090" and "广发 牛鋆辉 9759".
         for (const acct of group) {
           const cards = acct.cards || [];
-          const tailParts = cards.map(c => c.tail || c.card_last4 || '').filter(Boolean);
-          const tailDisplay = tailParts.length > 0 ? tailParts.join(' / ') : '';
-          const title = [bankShort, holder, tailDisplay].filter(Boolean).join(' ');
-
-          rows.push({
-            key: acct.id,
-            bankShort,
-            bankFull: bank,
-            holder,
-            merged: false,
-            accounts: [acct],
-            allCards: cards,
-            displayTitle: title || acct.alias || bank,
-            status: acct.status,
-            created_at: acct.created_at,
-          });
+          if (cards.length <= 1) {
+            // 0 or 1 card — one row for this account
+            const tail = cards.length === 1 ? (cards[0].tail || cards[0].card_last4 || '') : '';
+            const title = [bankShort, holder, tail].filter(Boolean).join(' ');
+            rows.push({
+              key: acct.id,
+              bankShort,
+              bankFull: bank,
+              holder,
+              merged: false,
+              accounts: [acct],
+              allCards: cards,
+              displayTitle: title || acct.alias || bank,
+              status: acct.status,
+              created_at: acct.created_at,
+            });
+          } else {
+            // Multiple cards — one row per card
+            for (const card of cards) {
+              const tail = card.tail || card.card_last4 || '';
+              const title = [bankShort, holder, tail].filter(Boolean).join(' ');
+              rows.push({
+                key: `${acct.id}__${card.id}`,
+                bankShort,
+                bankFull: bank,
+                holder,
+                merged: false,
+                accounts: [acct],
+                allCards: [card],
+                displayTitle: title || acct.alias || bank,
+                status: acct.status,
+                created_at: acct.created_at,
+              });
+            }
+          }
         }
       }
     }
