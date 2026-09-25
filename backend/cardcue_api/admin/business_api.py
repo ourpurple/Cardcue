@@ -512,7 +512,7 @@ async def list_statements(
     session: AsyncSession = Depends(get_session),
 ):
     query = (
-        select(Statement, Account.bank, Account.alias)
+        select(Statement, Account.bank, Account.alias, Account.holder)
         .join(Account, Statement.account_id == Account.id)
         .options(
             selectinload(Statement.versions),
