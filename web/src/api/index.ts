@@ -31,6 +31,7 @@ export const accountsApi = {
   createCard: (data: any) => apiClient.post('/admin/cards', data),
   updateCard: (id: string, data: any) => apiClient.put(`/admin/cards/${id}`, data),
   deleteCard: (id: string) => apiClient.delete(`/admin/cards/${id}`),
+  splitCard: (id: string) => apiClient.post(`/admin/cards/${id}/split`),
 };
 
 // 4. Statements & Payments API

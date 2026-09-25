@@ -22,6 +22,7 @@ import {
   CheckCircleOutlined,
   ReloadOutlined,
   DeleteOutlined,
+  SplitCellsOutlined,
 } from '@ant-design/icons';
 import { accountsApi } from '../api';
 import { BankAccount, AccountCard } from '../types';
@@ -290,6 +291,16 @@ export const Accounts: React.FC = () => {
     }
   };
 
+  const handleSplitCard = async (card: AccountCard) => {
+    try {
+      const res = await accountsApi.splitCard(card.id);
+      message.success(res.data?.message || `卡片尾号 ${card.tail || card.card_last4} 已拆分到新账户`);
+      fetchAccounts();
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '拆分卡片失败');
+    }
+  };
+
   // Card Add Handlers
   const openAddCard = (accountId: string) => {
     setSelectedAccountId(accountId);
@@ -440,6 +451,17 @@ export const Accounts: React.FC = () => {
                   </Button>
                 </Popconfirm>
               )}
+              <Popconfirm
+                title="确定将此卡片拆分为独立账户吗？"
+                description="拆分后该卡将拥有独立的账户和账单。"
+                onConfirm={() => handleSplitCard(card)}
+                okText="拆分"
+                cancelText="取消"
+              >
+                <Button type="link" size="small" icon={<SplitCellsOutlined />}>
+                  拆分
+                </Button>
+              </Popconfirm>
               <Popconfirm
                 title="确定删除此信用卡吗？"
                 description="彻底删除后不可恢复。"

@@ -497,6 +497,75 @@ async def delete_card(
 
 
 # ---------------------------------------------------------------------------
+# 2b. Card Split — move a card into its own new account
+# ---------------------------------------------------------------------------
+
+@router.post("/cards/{card_id}/split")
+async def split_card_to_new_account(
+    card_id: uuid.UUID,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Move a card from a multi-card account into a brand-new sibling account.
+
+    The new account inherits bank, holder, and currency from the original.
+    If the original account only has one card, the operation is rejected.
+    """
+    card = (await session.execute(
+        select(Card).where(Card.id == card_id).with_for_update()
+    )).scalar_one_or_none()
+    if not card:
+        raise HTTPException(404, "卡片不存在")
+
+    old_acct = (await session.execute(
+        select(Account).where(Account.id == card.account_id)
+        .options(selectinload(Account.cards))
+    )).scalar_one_or_none()
+    if not old_acct:
+        raise HTTPException(404, "所属账户不存在")
+
+    active_cards = [c for c in old_acct.cards if c.status == "active"]
+    if len(active_cards) <= 1:
+        raise HTTPException(400, "该账户仅有一张有效卡片，无需拆分")
+
+    # Create a new sibling account
+    tail = card.tail or ""
+    new_alias = f"{old_acct.bank}信用卡 ({old_acct.holder or tail})"
+    new_acct = Account(
+        bank=old_acct.bank,
+        alias=new_alias,
+        holder=old_acct.holder,
+        reference=None,
+        status="active",
+    )
+    session.add(new_acct)
+    await session.flush()  # get new_acct.id
+
+    # Move the card
+    card.account_id = new_acct.id
+
+    await billing_svc._log_change(session, "card", card.id, "split", {
+        "old_account_id": str(old_acct.id),
+        "new_account_id": str(new_acct.id),
+        "tail": card.tail,
+    })
+    await audit(session, actor, "card_split", str(card.id), {
+        "old_account_id": str(old_acct.id),
+        "new_account_id": str(new_acct.id),
+        "new_alias": new_alias,
+        "tail": card.tail,
+    })
+
+    await session.commit()
+    return {
+        "success": True,
+        "message": f"卡片尾号 {tail} 已拆分到新账户",
+        "new_account_id": str(new_acct.id),
+        "new_alias": new_alias,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 3. Statements & Payments
 # ---------------------------------------------------------------------------
 
