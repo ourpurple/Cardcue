@@ -26,7 +26,7 @@ import {
 } from '@ant-design/icons';
 import { accountsApi } from '../api';
 import { BankAccount, AccountCard } from '../types';
-import { getBankShort, isMultiAccountBank, isSingleAccountBank } from '../utils/bankDisplay';
+import { getBankShort, isMultiAccountBank, isSingleAccountBank, formatBankHolderTails, getCustomDisplayName, cleanAccountAlias } from '../utils/bankDisplay';
 
 const { Text } = Typography;
 
@@ -100,12 +100,13 @@ export const Accounts: React.FC = () => {
 
   // ---- Build display rows ----
   const displayRows = useMemo<DisplayRow[]>(() => {
-    // Group accounts by (bank, holder)
+    // Group accounts by (bankShort, holder)
     const groups = new Map<string, BankAccount[]>();
     for (const acct of accounts) {
       const bank = acct.bank || acct.bank_name || '';
-      const holder = acct.holder || '';
-      const key = `${bank}||${holder}`;
+      const holder = (acct.holder || '').trim();
+      const bankShort = getBankShort(bank);
+      const key = `${bankShort}||${holder}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(acct);
     }
@@ -135,8 +136,7 @@ export const Accounts: React.FC = () => {
           }
         }
         const tailParts = allCards.map(c => c.tail || c.card_last4 || '').filter(Boolean);
-        const tailDisplay = tailParts.length > 0 ? tailParts.join(' / ') : '';
-        const title = [bankShort, holder, tailDisplay].filter(Boolean).join(' ');
+        const title = formatBankHolderTails(bankShort, holder, tailParts);
 
         rows.push({
           key: group.map(a => a.id).join('__'),
@@ -160,11 +160,11 @@ export const Accounts: React.FC = () => {
           if (cards.length <= 1) {
             // 0 or 1 card — one row for this account
             const tail = cards.length === 1 ? (cards[0].tail || cards[0].card_last4 || '') : '';
-            const title = [bankShort, holder, tail].filter(Boolean).join(' ');
+            const title = formatBankHolderTails(bankShort, holder, tail);
             rows.push({
               key: acct.id,
               bankShort,
-              bankFull: bank,
+              bankFull: acct.bank || bank,
               holder,
               merged: false,
               accounts: [acct],
@@ -177,11 +177,11 @@ export const Accounts: React.FC = () => {
             // Multiple cards — one row per card
             for (const card of cards) {
               const tail = card.tail || card.card_last4 || '';
-              const title = [bankShort, holder, tail].filter(Boolean).join(' ');
+              const title = formatBankHolderTails(bankShort, holder, tail);
               rows.push({
                 key: `${acct.id}__${card.id}`,
                 bankShort,
-                bankFull: bank,
+                bankFull: acct.bank || bank,
                 holder,
                 merged: false,
                 accounts: [acct],
@@ -397,7 +397,7 @@ export const Accounts: React.FC = () => {
         title: '卡片名称 / 备注',
         key: 'display_name',
         render: (_: any, card: AccountCard) => (
-          <Text strong>{card.display_name || card.card_alias || '信用卡'}</Text>
+          <Text strong>{getCustomDisplayName(card.display_name || card.card_alias, row.bankFull, card.tail || card.card_last4) || '信用卡'}</Text>
         ),
       },
       ...(row.merged ? [{
@@ -451,17 +451,24 @@ export const Accounts: React.FC = () => {
                   </Button>
                 </Popconfirm>
               )}
-              <Popconfirm
-                title="确定将此卡片拆分为独立账户吗？"
-                description="拆分后该卡将拥有独立的账户和账单。"
-                onConfirm={() => handleSplitCard(card)}
-                okText="拆分"
-                cancelText="取消"
-              >
-                <Button type="link" size="small" icon={<SplitCellsOutlined />}>
-                  拆分
-                </Button>
-              </Popconfirm>
+              {(() => {
+                const parentAcct = allAccounts.find(a => a.id === card.account_id);
+                const canSplit = parentAcct && (parentAcct.cards?.length || 0) > 1;
+                if (!canSplit) return null;
+                return (
+                  <Popconfirm
+                    title="确定将此卡片拆分为独立账户吗？"
+                    description="拆分后该卡将拥有独立的账户和账单。"
+                    onConfirm={() => handleSplitCard(card)}
+                    okText="拆分"
+                    cancelText="取消"
+                  >
+                    <Button type="link" size="small" icon={<SplitCellsOutlined />}>
+                      拆分
+                    </Button>
+                  </Popconfirm>
+                );
+              })()}
               <Popconfirm
                 title="确定删除此信用卡吗？"
                 description="彻底删除后不可恢复。"
@@ -544,11 +551,14 @@ export const Accounts: React.FC = () => {
                   {row.accounts.length} 个账户合并
                 </Tag>
               ) : null}
-              {acct.alias ? (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {acct.alias}
-                </Text>
-              ) : null}
+              {(() => {
+                const cleaned = cleanAccountAlias(acct.alias, row.bankFull, row.holder);
+                return cleaned ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {cleaned}
+                  </Text>
+                ) : null;
+              })()}
               {acct.reference ? (
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   参考编号: {acct.reference}

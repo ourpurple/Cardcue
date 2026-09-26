@@ -1244,6 +1244,7 @@ async def list_drafts(
             StatementDraftModel,
             Account.bank.label("account_bank"),
             Account.alias.label("account_alias"),
+            Account.holder.label("account_holder"),
             Card.tail.label("card_tail"),
         )
         .outerjoin(Account, StatementDraftModel.matched_account_id == Account.id)
@@ -1260,7 +1261,7 @@ async def list_drafts(
     rows = (await session.execute(query)).all()
 
     items = []
-    for d, acct_bank, acct_alias, card_tail in rows:
+    for d, acct_bank, acct_alias, acct_holder, card_tail in rows:
         items.append({
             "id": str(d.id),
             "email_source_id": str(d.email_source_id) if d.email_source_id else None,
@@ -1276,6 +1277,8 @@ async def list_drafts(
             "review_reasons": d.review_reasons or [],
             "matched_account_id": str(d.matched_account_id) if d.matched_account_id else None,
             "matched_account_name": (acct_alias or acct_bank) if acct_bank else None,
+            "matched_account_bank": acct_bank,
+            "matched_account_holder": acct_holder,
             "matched_card_id": str(d.matched_card_id) if d.matched_card_id else None,
             "matched_card_tail": card_tail,
             "extractor_name": d.extractor_name,
@@ -1299,7 +1302,10 @@ async def get_draft_detail(
     matched_card = await session.get(Card, draft.matched_card_id) if draft.matched_card_id else None
 
     all_accounts = list((await session.execute(
-        select(Account).where(Account.status == "active").order_by(Account.bank)
+        select(Account)
+        .options(selectinload(Account.cards))
+        .where(Account.status == "active")
+        .order_by(Account.bank)
     )).scalars().all())
 
     candidate_cards = []
@@ -1343,6 +1349,7 @@ async def get_draft_detail(
             "id": str(matched_account.id),
             "bank": matched_account.bank,
             "alias": matched_account.alias,
+            "holder": matched_account.holder,
         } if matched_account else None,
         "matched_card": {
             "id": str(matched_card.id),
@@ -1353,7 +1360,14 @@ async def get_draft_detail(
             "id": str(a.id),
             "bank": a.bank,
             "alias": a.alias,
+            "holder": a.holder,
             "reference": a.reference,
+            "cards": [{
+                "id": str(c.id),
+                "tail": c.tail,
+                "display_name": c.display_name,
+                "status": c.status,
+            } for c in a.cards if c.status == "active"],
         } for a in all_accounts],
         "candidate_cards": [{
             "id": str(c.id),

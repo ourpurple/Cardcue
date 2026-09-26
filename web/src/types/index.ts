@@ -134,6 +134,8 @@ export interface StatementDraftItem {
   review_reasons: string[];
   matched_account_id: string | null;
   matched_account_name: string | null;
+  matched_account_bank?: string | null;
+  matched_account_holder?: string | null;
   matched_card_id: string | null;
   matched_card_tail: string | null;
   extractor_name: string;
@@ -149,6 +151,7 @@ export interface StatementDraftDetail extends StatementDraftItem {
     id: string;
     bank: string;
     alias: string | null;
+    holder?: string | null;
   } | null;
   matched_card: {
     id: string;
@@ -159,7 +162,14 @@ export interface StatementDraftDetail extends StatementDraftItem {
     id: string;
     bank: string;
     alias: string | null;
+    holder?: string | null;
     reference: string | null;
+    cards?: Array<{
+      id: string;
+      tail: string;
+      display_name: string | null;
+      status?: string;
+    }>;
   }[];
   candidate_cards: {
     id: string;

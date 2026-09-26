@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   Table,
   Button,
@@ -28,10 +28,12 @@ import {
   FileTextOutlined,
   DeleteOutlined,
   ClearOutlined,
+  CheckCircleOutlined,
 } from '@ant-design/icons';
-import { draftsApi, accountsApi } from '../api';
+import { draftsApi } from '../api';
 import { CurrencyAmount, centsToYuanString, yuanStringToCents } from '../components/CurrencyAmount';
-import { StatementDraftItem, StatementDraftDetail, BankAccount } from '../types';
+import { StatementDraftItem, StatementDraftDetail } from '../types';
+import { getBankShort, formatBankHolderTails, buildAccountCardOptions, AccountCardOption, cleanAccountAlias } from '../utils/bankDisplay';
 
 const { Text, Title, Paragraph } = Typography;
 
@@ -63,7 +65,8 @@ export const DraftReview: React.FC = () => {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [currentDraft, setCurrentDraft] = useState<StatementDraftDetail | null>(null);
-  const [candidateCards, setCandidateCards] = useState<Array<{ id: string; tail: string; display_name: string | null }>>([]);
+  const [accountCardOptions, setAccountCardOptions] = useState<AccountCardOption[]>([]);
+  const [selectedOption, setSelectedOption] = useState<AccountCardOption | null>(null);
 
   const [form] = Form.useForm();
   const [actionLoading, setActionLoading] = useState(false);
@@ -156,12 +159,61 @@ export const DraftReview: React.FC = () => {
       const res = await draftsApi.getDraft(draftId);
       const detail: StatementDraftDetail = res.data;
       setCurrentDraft(detail);
-      setCandidateCards(detail.candidate_cards || []);
+
+      const allOptions = buildAccountCardOptions(detail.candidate_accounts || []);
+      setAccountCardOptions(allOptions);
+
+      // Determine initial selection
+      let initialKey: string | undefined = undefined;
+      let matchedOpt: AccountCardOption | null = null;
+
+      if (detail.matched_account_id && detail.matched_card_id) {
+        initialKey = `${detail.matched_account_id}__${detail.matched_card_id}`;
+        matchedOpt = allOptions.find((o) => o.value === initialKey) || null;
+      } else if (detail.matched_account_id) {
+        const draftTails = detail.card_tails || [];
+        const acctCards = allOptions.filter(
+          (o) => o.accountId === detail.matched_account_id && !o.isAccountOnly
+        );
+        const tailMatch = acctCards.find((o) => o.tail && draftTails.includes(o.tail));
+        if (tailMatch) {
+          initialKey = tailMatch.value;
+          matchedOpt = tailMatch;
+        } else if (acctCards.length === 1) {
+          initialKey = acctCards[0].value;
+          matchedOpt = acctCards[0];
+        } else {
+          initialKey = allOptions.some((o) => o.value === `${detail.matched_account_id}__all`)
+            ? `${detail.matched_account_id}__all`
+            : `${detail.matched_account_id}__none`;
+          matchedOpt = allOptions.find((o) => o.value === initialKey) || null;
+        }
+      } else {
+        // Neither matched yet. Try to find unique exact card match by bank + tail
+        const draftTails = detail.card_tails || [];
+        const draftBank = detail.bank || '';
+        const draftBankShort = getBankShort(draftBank);
+        const exactMatches = allOptions.filter(
+          (o) =>
+            o.tail &&
+            draftTails.includes(o.tail) &&
+            (o.bank.includes(draftBank) ||
+              draftBank.includes(o.bank) ||
+              (!!draftBankShort && o.bankShort === draftBankShort))
+        );
+        if (exactMatches.length === 1) {
+          initialKey = exactMatches[0].value;
+          matchedOpt = exactMatches[0];
+        }
+      }
+
+      setSelectedOption(matchedOpt);
 
       form.setFieldsValue({
-        account_id: detail.matched_account_id || undefined,
-        card_id: detail.matched_card_id || undefined,
-        bank: detail.bank || '',
+        account_card_key: initialKey,
+        account_id: matchedOpt?.accountId || detail.matched_account_id || undefined,
+        card_id: matchedOpt?.cardId || detail.matched_card_id || undefined,
+        bank: detail.bank || matchedOpt?.bank || '',
         currency: detail.currency || 'CNY',
         amount_yuan: detail.amount_minor != null ? (detail.amount_minor / 100).toFixed(2) : '',
         minimum_yuan: detail.minimum_minor != null ? (detail.minimum_minor / 100).toFixed(2) : '',
@@ -175,19 +227,92 @@ export const DraftReview: React.FC = () => {
     }
   };
 
-  const handleAccountChange = async (accountId: string) => {
-    form.setFieldValue('card_id', undefined);
-    if (!accountId) {
-      setCandidateCards([]);
+  const handleAccountCardChange = (val: string | undefined) => {
+    if (!val) {
+      setSelectedOption(null);
+      form.setFieldsValue({
+        account_card_key: undefined,
+        account_id: undefined,
+        card_id: undefined,
+      });
       return;
     }
-    try {
-      const res = await accountsApi.listCards(accountId);
-      setCandidateCards(res.data || []);
-    } catch (_) {
-      setCandidateCards([]);
+    const opt = accountCardOptions.find((o) => o.value === val);
+    if (!opt) {
+      setSelectedOption(null);
+      return;
     }
+    setSelectedOption(opt);
+    form.setFieldsValue({
+      account_card_key: val,
+      account_id: opt.accountId,
+      card_id: opt.cardId || undefined,
+      bank: opt.bank || form.getFieldValue('bank'),
+    });
   };
+
+  const selectOptions = useMemo(() => {
+    if (!currentDraft || accountCardOptions.length === 0) {
+      return [];
+    }
+
+    const draftBank = currentDraft.bank || '';
+    const draftBankShort = getBankShort(draftBank);
+    const draftTails = new Set(currentDraft.card_tails || []);
+
+    const recommended: AccountCardOption[] = [];
+    const others: AccountCardOption[] = [];
+
+    for (const opt of accountCardOptions) {
+      const matchesTail = !!opt.tail && draftTails.has(opt.tail);
+      const matchesBank =
+        !!draftBank &&
+        (opt.bank.includes(draftBank) ||
+          draftBank.includes(opt.bank) ||
+          (!!draftBankShort && opt.bankShort === draftBankShort));
+
+      if (matchesTail || matchesBank) {
+        recommended.push(opt);
+      } else {
+        others.push(opt);
+      }
+    }
+
+    // Sort recommended: matching tails first!
+    recommended.sort((a, b) => {
+      const aTailMatch = a.tail && draftTails.has(a.tail) ? 1 : 0;
+      const bTailMatch = b.tail && draftTails.has(b.tail) ? 1 : 0;
+      if (bTailMatch !== aTailMatch) return bTailMatch - aTailMatch;
+      return a.label.localeCompare(b.label);
+    });
+
+    const formatOption = (opt: AccountCardOption) => ({
+      label: opt.label,
+      value: opt.value,
+      filterText: opt.filterText,
+      data: opt,
+    });
+
+    if (recommended.length > 0) {
+      return [
+        {
+          label: `推荐匹配 (${draftBankShort || draftBank || '当前账单'})`,
+          options: recommended.map(formatOption),
+        },
+        {
+          label: '其他账户与卡片',
+          options: others.map(formatOption),
+        },
+      ];
+    }
+
+    return [
+      {
+        label: '所有账户与卡片',
+        options: accountCardOptions.map(formatOption),
+      },
+    ];
+  }, [currentDraft, accountCardOptions]);
 
   const handleSaveDraft = async () => {
     if (!currentDraft) return;
@@ -223,7 +348,7 @@ export const DraftReview: React.FC = () => {
     try {
       const values = await form.validateFields();
       if (!values.account_id) {
-        message.error('请在确认前选择归属银行账户');
+        message.error('请从账户与卡片中选择归属项');
         return;
       }
       if (!values.statement_date || !values.due_date) {
@@ -283,20 +408,44 @@ export const DraftReview: React.FC = () => {
     {
       title: '银行与卡号',
       key: 'bank',
-      render: (_: any, record: StatementDraftItem) => (
-        <div>
-          <Text strong>{record.bank || '未知银行'}</Text>
+      render: (_: any, record: StatementDraftItem) => {
+        const bankShort = getBankShort(record.bank || record.matched_account_bank);
+        const holder = record.matched_account_holder || '';
+        const tails = record.card_tails || [];
+        if (tails.length <= 1) {
+          const title = [bankShort, holder, tails[0]].filter(Boolean).join(' ');
+          return (
+            <div>
+              <Text strong style={{ fontSize: 15 }}>{title || record.bank || '未知银行'}</Text>
+              {record.bank && record.bank !== title && (
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {record.bank}
+                  </Text>
+                </div>
+              )}
+            </div>
+          );
+        }
+        return (
           <div>
-            {record.card_tails && record.card_tails.length > 0 ? (
-              record.card_tails.map((t) => <Tag key={t}>尾号 {t}</Tag>)
-            ) : (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                未识别尾号
-              </Text>
+            {tails.map((t, i) => (
+              <div key={i}>
+                <Text strong style={{ fontSize: 15 }}>
+                  {[bankShort, holder, t].filter(Boolean).join(' ')}
+                </Text>
+              </div>
+            ))}
+            {record.bank && (
+              <div>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {record.bank}
+                </Text>
+              </div>
             )}
           </div>
-        </div>
-      ),
+        );
+      },
     },
     {
       title: '识别账单金额',
@@ -323,18 +472,41 @@ export const DraftReview: React.FC = () => {
       ),
     },
     {
-      title: '匹配账户',
+      title: '匹配账户与卡片',
       key: 'matched',
-      render: (_: any, record: StatementDraftItem) => (
-        <div>
-          {record.matched_account_name ? (
-            <Tag color="blue">{record.matched_account_name}</Tag>
-          ) : (
-            <Tag color="default">未匹配</Tag>
-          )}
-          {record.matched_card_tail && <Tag>尾号 {record.matched_card_tail}</Tag>}
-        </div>
-      ),
+      render: (_: any, record: StatementDraftItem) => {
+        const bankShort = getBankShort(record.matched_account_bank || record.bank);
+        const holder = record.matched_account_holder || '';
+        const tail = record.matched_card_tail || (record.card_tails?.length === 1 ? record.card_tails[0] : '');
+        const matchedTitle = formatBankHolderTails(record.matched_account_bank, holder, tail);
+
+        return (
+          <div>
+            {record.matched_account_id ? (
+              <Space direction="vertical" size={2}>
+                <Text strong style={{ fontSize: 15, color: '#1677ff' }}>
+                  {matchedTitle || cleanAccountAlias(record.matched_account_name, record.matched_account_bank || record.bank, holder) || '已匹配账户'}
+                </Text>
+                <Space size={6}>
+                  <Tag color="cyan">已绑定</Tag>
+                  {(() => {
+                    const cleaned = cleanAccountAlias(record.matched_account_name, record.matched_account_bank || record.bank, holder);
+                    return cleaned && cleaned !== matchedTitle ? (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {cleaned}
+                      </Text>
+                    ) : null;
+                  })()}
+                </Space>
+              </Space>
+            ) : (
+              <Tag color="orange" style={{ padding: '2px 8px', fontSize: 12 }}>
+                待选取账户与卡片
+              </Tag>
+            )}
+          </div>
+        );
+      },
     },
     {
       title: '审核状态',
@@ -660,30 +832,97 @@ export const DraftReview: React.FC = () => {
                   disabled={currentDraft.status !== 'pending_review'}
                 >
                   <Form.Item
-                    name="account_id"
-                    label="归属银行账户 (必填)"
-                    rules={[{ required: true, message: '请选择归属银行账户' }]}
+                    name="account_card_key"
+                    label="归属账户与卡片 (必填)"
+                    rules={[{ required: true, message: '请从账户与卡片中选取' }]}
+                    extra="从已有账户与卡片中选取。格式：银行缩写 持卡人 卡号后四位。优先推荐与草稿相符的账户与卡片。"
                   >
                     <Select
-                      placeholder="请选择归属银行账户"
-                      onChange={handleAccountChange}
-                      options={(currentDraft.candidate_accounts || []).map((a) => ({
-                        label: a.alias ? `${a.bank} (${a.alias})` : a.bank,
-                        value: a.id,
-                      }))}
+                      showSearch
+                      allowClear
+                      placeholder="请从账户与卡片中选取 (例如: 广发 牛鋆辉 2090)"
+                      optionFilterProp="filterText"
+                      filterOption={(input, option) => {
+                        const targetText = ((option as any)?.filterText || (option?.label as string) || '').toLowerCase();
+                        return targetText.includes(input.toLowerCase().trim());
+                      }}
+                      onChange={handleAccountCardChange}
+                      options={selectOptions}
+                      optionRender={(option) => {
+                        const opt = (option.data as any)?.data as AccountCardOption | undefined;
+                        if (!opt) return option.data.label;
+                        return (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 0' }}>
+                            <Space size={8}>
+                              <Text strong style={{ fontSize: 14 }}>
+                                {opt.label}
+                              </Text>
+                              {opt.tail && <Tag color="cyan">尾号 {opt.tail}</Tag>}
+                              {opt.extraText && (
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  ({opt.extraText})
+                                </Text>
+                              )}
+                            </Space>
+                            <Tag color="blue">{opt.bankShort}</Tag>
+                          </div>
+                        );
+                      }}
                     />
                   </Form.Item>
 
-                  <Form.Item name="card_id" label="归属卡片 (可选)">
-                    <Select
-                      placeholder="选择具体卡片"
-                      allowClear
-                      options={candidateCards.map((c) => ({
-                        label: c.display_name ? `尾号 ${c.tail} (${c.display_name})` : `尾号 ${c.tail}`,
-                        value: c.id,
-                      }))}
-                    />
+                  <Form.Item
+                    name="account_id"
+                    hidden
+                    rules={[{ required: true, message: '请从账户与卡片中选择归属项' }]}
+                  >
+                    <Input />
                   </Form.Item>
+                  <Form.Item name="card_id" hidden>
+                    <Input />
+                  </Form.Item>
+
+                  {selectedOption && (
+                    <div
+                      style={{
+                        marginTop: -6,
+                        marginBottom: 16,
+                        padding: '10px 14px',
+                        background: '#f6ffed',
+                        border: '1px solid #b7eb8f',
+                        borderRadius: 8,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <Space wrap size={8}>
+                        <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 18 }} />
+                        <span>
+                          当前归属: <Text strong style={{ color: '#237804', fontSize: 15 }}>{selectedOption.label}</Text>
+                        </span>
+                        {selectedOption.tail ? (
+                          <Tag color="cyan" style={{ fontWeight: 600 }}>尾号 {selectedOption.tail}</Tag>
+                        ) : (
+                          <Tag color="orange">整户/合并还款</Tag>
+                        )}
+                        <Tag color="blue">{selectedOption.bankShort}</Tag>
+                        {selectedOption.extraText && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>({selectedOption.extraText})</Text>
+                        )}
+                      </Space>
+                      {currentDraft.status === 'pending_review' && (
+                        <Button
+                          type="link"
+                          size="small"
+                          style={{ padding: 0, height: 'auto', fontSize: 12 }}
+                          onClick={() => handleAccountCardChange(undefined)}
+                        >
+                          重新选择
+                        </Button>
+                      )}
+                    </div>
+                  )}
 
                   <Row gutter={12}>
                     <Col span={14}>

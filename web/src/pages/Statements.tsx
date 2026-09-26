@@ -32,7 +32,7 @@ import {
 import { statementsApi, accountsApi } from '../api';
 import { CurrencyAmount, centsToYuanString, yuanStringToCents } from '../components/CurrencyAmount';
 import { StatementListItem, StatementDetailData, BankAccount } from '../types';
-import { getBankShort } from '../utils/bankDisplay';
+import { getBankShort, formatBankHolderTails, cleanAccountAlias } from '../utils/bankDisplay';
 
 const { Text, Title, Paragraph } = Typography;
 
@@ -305,41 +305,22 @@ export const Statements: React.FC = () => {
       key: 'bank',
       render: (_: any, record: StatementListItem) => {
         const bankShort = getBankShort(record.bank);
-        const tails = record.card_tails || [];
-        if (tails.length <= 1) {
-          // 0 or 1 card: single line
-          const title = [bankShort, record.holder, tails[0]].filter(Boolean).join(' ');
-          return (
-            <div>
-              <Text strong style={{ fontSize: 16 }}>{title || record.bank}</Text>
-              {record.account_alias && (
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {record.account_alias}
-                  </Text>
-                </div>
-              )}
-            </div>
-          );
-        }
-        // Multiple cards: one line per card tail
+        const title = formatBankHolderTails(record.bank, record.holder, record.card_tails);
         return (
-          <div>
-            {tails.map((t, i) => (
-              <div key={i}>
-                <Text strong style={{ fontSize: 16 }}>
-                  {[bankShort, record.holder, t].filter(Boolean).join(' ')}
-                </Text>
-              </div>
-            ))}
-            {record.account_alias && (
-              <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {record.account_alias}
-                </Text>
-              </div>
-            )}
-          </div>
+          <Space direction="vertical" size={2}>
+            <Text strong style={{ fontSize: 16 }}>{title || record.bank}</Text>
+            <Space size={8} style={{ marginTop: 2 }}>
+              <Tag color="blue">{bankShort}</Tag>
+              {(() => {
+                const cleaned = cleanAccountAlias(record.account_alias, record.bank, record.holder);
+                return cleaned ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {cleaned}
+                  </Text>
+                ) : null;
+              })()}
+            </Space>
+          </Space>
         );
       },
     },
@@ -478,7 +459,9 @@ export const Statements: React.FC = () => {
               ]}
             />
             <Select
-              style={{ width: 160 }}
+              showSearch
+              optionFilterProp="label"
+              style={{ width: 280 }}
               placeholder="筛选银行账户"
               allowClear
               value={accountFilter}
@@ -486,10 +469,15 @@ export const Statements: React.FC = () => {
                 setAccountFilter(val);
                 setPage(1);
               }}
-              options={accounts.map((a) => ({
-                label: (() => { const bs = getBankShort(a.bank || a.bank_name); const h = (a as any).holder || ''; return a.alias ? `${bs} ${h} (${a.alias})`.trim() : bs || a.bank || a.bank_name || a.id; })(),
-                value: a.id,
-              }))}
+              options={accounts.map((a) => {
+                const tails = (a.cards || []).map(c => c.tail || c.card_last4).filter(Boolean) as string[];
+                const title = formatBankHolderTails(a.bank || a.bank_name, a.holder, tails);
+                const label = a.alias && !title.includes(a.alias) ? `${title} (${a.alias})` : title;
+                return {
+                  label,
+                  value: a.id,
+                };
+              })}
             />
             <Select
               style={{ width: 100 }}
@@ -591,7 +579,10 @@ export const Statements: React.FC = () => {
 
             <Paragraph>
               <Text strong>银行账户: </Text>
-              {(() => { const bs = getBankShort(currentDetail.bank); const tails = currentDetail.card_tails || []; if (tails.length <= 1) return [bs, currentDetail.holder, tails[0]].filter(Boolean).join(' ') || currentDetail.bank; return tails.map(t => [bs, currentDetail.holder, t].filter(Boolean).join(' ')).join('、'); })()}{currentDetail.account_alias && ` (${currentDetail.account_alias})`}
+              {formatBankHolderTails(currentDetail.bank, currentDetail.holder, currentDetail.card_tails)}{(() => {
+                const cleaned = cleanAccountAlias(currentDetail.account_alias, currentDetail.bank, currentDetail.holder);
+                return cleaned ? ` (${cleaned})` : '';
+              })()}
               <Divider type="vertical" />
               <Text strong>账单日: </Text>
               {currentDetail.statement_date}
@@ -749,7 +740,7 @@ export const Statements: React.FC = () => {
         {paymentTarget && (
           <Form form={paymentForm} layout="vertical">
             <Paragraph>
-              正在为 <Text strong>{(() => { const bs = getBankShort(paymentTarget.bank); const tails = paymentTarget.card_tails || []; if (tails.length <= 1) return [bs, paymentTarget.holder, tails[0]].filter(Boolean).join(' ') || paymentTarget.bank; return tails.map(t => [bs, paymentTarget.holder, t].filter(Boolean).join(' ')).join('、'); })()}</Text> 账单记录还款。当前剩余应还金额:{' '}
+              正在为 <Text strong>{formatBankHolderTails(paymentTarget.bank, paymentTarget.holder, paymentTarget.card_tails)}</Text> 账单记录还款。当前剩余应还金额:{' '}
               <CurrencyAmount
                 cents={paymentTarget.remaining_minor}
                 currency={paymentTarget.currency}
