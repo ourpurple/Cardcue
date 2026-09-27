@@ -651,6 +651,10 @@ async def list_statements(
             "created_at": stmt.created_at,
         })
 
+    # Stable-sort: unpaid (remaining > 0) first, then settled (remaining == 0).
+    # Within each group the original query order (by sort_by / sort_order) is preserved.
+    items.sort(key=lambda it: (0 if it["remaining_minor"] > 0 else 1))
+
     total = len(items)
     paginated = items[(page - 1) * size : page * size]
     return {"items": paginated, "total": total, "page": page, "size": size}
