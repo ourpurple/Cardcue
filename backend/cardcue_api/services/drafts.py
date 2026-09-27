@@ -260,7 +260,7 @@ class DraftService:
         self,
         session: AsyncSession,
         draft_id: uuid.UUID,
-        confirm: StatementDraftConfirmRequest,
+        req: StatementDraftConfirmRequest,
         confirmed_by: str = "system",
     ) -> tuple:
         """Confirm a draft and create/update Statement + Version atomically."""
@@ -273,21 +273,21 @@ class DraftService:
         if draft.status != "pending_review":
             raise ConflictError(f"Draft is already {draft.status}; cannot confirm")
 
-        if confirm.expected_revision is not None and draft.revision != confirm.expected_revision:
+        if req.expected_revision is not None and draft.revision != req.expected_revision:
             raise ConflictError("Draft changed; reload before confirming")
 
-        account_id = confirm.account_id
-        card_id = confirm.card_id
-        currency = confirm.currency or draft.currency
-        amount_minor = confirm.amount_minor if confirm.amount_minor is not None else draft.amount_minor
-        minimum_minor = confirm.minimum_minor if confirm.minimum_minor is not None else draft.minimum_minor
-        statement_date = confirm.statement_date or draft.statement_date
-        due_date = confirm.due_date or draft.due_date
+        account_id = req.account_id
+        card_id = req.card_id
+        currency = req.currency or draft.currency
+        amount_minor = req.amount_minor if req.amount_minor is not None else draft.amount_minor
+        minimum_minor = req.minimum_minor if req.minimum_minor is not None else draft.minimum_minor
+        statement_date = req.statement_date or draft.statement_date
+        due_date = req.due_date or draft.due_date
 
         if not currency or amount_minor is None or not statement_date or not due_date:
             raise ConflictError("Cannot confirm: required fields missing")
 
-        receipt_id = confirm.request_id or uuid.uuid4()
+        receipt_id = req.request_id or uuid.uuid4()
         fingerprint = f"confirm:{draft_id}:{receipt_id}"
         existing = await session.get(CommandReceipt, receipt_id)
         if existing:
@@ -303,7 +303,7 @@ class DraftService:
         )).scalar_one_or_none()
 
         if existing_stmt:
-            if confirm.expected_statement_version_id and existing_stmt.current_version_id != confirm.expected_statement_version_id:
+            if req.expected_statement_version_id and existing_stmt.current_version_id != req.expected_statement_version_id:
                 raise ConflictError("Statement version changed; reload")
 
             stmt = existing_stmt
