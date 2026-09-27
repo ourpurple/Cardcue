@@ -1,6 +1,7 @@
 """Draft service: parsing email sources into drafts, manual review, and atomic confirmation."""
 
 import os
+import hashlib
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any
@@ -288,7 +289,7 @@ class DraftService:
             raise ConflictError("Cannot confirm: required fields missing")
 
         receipt_id = req.request_id or uuid.uuid4()
-        fingerprint = f"confirm:{draft_id}:{receipt_id}"
+        fingerprint = hashlib.sha256(f"confirm:{draft_id}:{receipt_id}".encode()).hexdigest()
         existing = await session.get(CommandReceipt, receipt_id)
         if existing:
             return existing.result
