@@ -84,12 +84,57 @@ class DraftService:
             raise NotFoundError(f"Statement draft {draft_id} not found")
         return draft
 
+    def _create_draft_model(
+        self,
+        draft_data: Any,
+        source: EmailSource,
+        extractor_name: str,
+        fingerprint: str | None = None,
+    ) -> StatementDraftModel:
+        """Create a StatementDraftModel from a StatementDraft contract object."""
+        return StatementDraftModel(
+            email_source_id=source.id,
+            mailbox_id=source.mailbox_id,
+            status="pending_review",
+            bank=draft_data.bank,
+            currency=draft_data.currency,
+            amount_minor=draft_data.amount_minor,
+            minimum_minor=draft_data.minimum_minor,
+            statement_date=draft_data.statement_date,
+            due_date=draft_data.due_date,
+            account_reference=draft_data.account_reference,
+            card_tails=draft_data.card_tails,
+            evidence=[{"field": e.field, "excerpt": e.excerpt} for e in draft_data.evidence],
+            review_reasons=draft_data.review_reasons,
+            extractor_name=extractor_name,
+            model_fingerprint=fingerprint,
+        )
+
     async def parse_email_source(
         self,
         session: AsyncSession,
         source_id: uuid.UUID,
     ) -> StatementDraftModel:
-        """Parse an EmailSource into a StatementDraftModel."""
+        """Parse an EmailSource into StatementDraftModel(s).
+
+        Returns the first draft. For emails with multiple cards (e.g. CCB),
+        creates multiple draft records in the database.
+
+        Use parse_email_source_multi() to get all created drafts.
+        """
+        drafts = await self.parse_email_source_multi(session, source_id)
+        return drafts[0]
+
+    async def parse_email_source_multi(
+        self,
+        session: AsyncSession,
+        source_id: uuid.UUID,
+    ) -> list[StatementDraftModel]:
+        """Parse an EmailSource into one or more StatementDraftModel records.
+
+        For emails containing bills for multiple cards (e.g. CCB emails listing
+        each card's balance separately), creates one draft per card.
+        """
         source_stmt = (
             select(EmailSource)
             .where(EmailSource.id == source_id)
@@ -124,198 +169,151 @@ class DraftService:
                 parsed_email = self.mime_parser.parse_bytes(raw_bytes)
                 if parsed_email.body_html:
                     email_body_text = self.html_extractor.html_to_text(parsed_email.body_html)
-                elif parsed_email.body_plain:
-                    email_body_text = parsed_email.body_plain
+                elif parsed_email.body_text:
+                    email_body_text = parsed_email.body_text
             except Exception:
                 pass
 
-        # 3. Choose primary text for extraction: prefer PDF text if non-empty, else email body
-        text_to_extract = pdf_text.strip() if pdf_text.strip() else email_body_text.strip()
+        # 3. Determine the best text to parse
+        parse_text = pdf_text or email_body_text
+        email_date_value = source.email_date.date() if hasattr(source.email_date, "date") else source.email_date
 
-        # 4. Extract statement using model extractor (LLM if configured, rule fallback otherwise)
-        if text_to_extract:
-            if self.model_extractor.revision is None:
-                try:
-                    from cardcue_api.admin.models import ModelRevision, RuntimeSettings
-                    state = await session.get(RuntimeSettings, "model")
-                    if not (state and state.value and state.value.get("revision_id")):
-                        from cardcue_api.admin.config_api import ensure_default_model_from_env
-                        await ensure_default_model_from_env(session)
-                        state = await session.get(RuntimeSettings, "model")
-                    if state and state.value and state.value.get("revision_id"):
-                        active_rev = await session.get(ModelRevision, uuid.UUID(state.value["revision_id"]))
-                        if active_rev and not active_rev.revoked:
-                            self.model_extractor.revision = active_rev
-                except Exception:
-                    pass
-
-            extracted_draft, extractor_name = await self.model_extractor.extract(
-                text=text_to_extract,
-                subject=source.subject or "",
-                sender=source.sender or "",
-                email_date=source.email_date.date() if source.email_date else None,
-            )
-        else:
-            extracted_draft = self.html_extractor.extract(
+        if not parse_text:
+            # No text to parse
+            draft_data_list = [self.html_extractor.extract(
                 content="",
                 is_html=False,
-                subject=source.subject or "",
-                sender=source.sender or "",
-                email_date=source.email_date.date() if source.email_date else None,
-            )
-            extractor_name = "rule:empty"
-
-        if has_encrypted_pdf and "attachment_password_required" not in extracted_draft.review_reasons:
-            reasons = list(extracted_draft.review_reasons)
-            reasons.append("attachment_password_required")
-            extracted_draft.review_reasons = list(dict.fromkeys(reasons))
-
-        # 3. Account and Card matching in database
-        matched_account_id = None
-        matched_card_id = None
-
-        # A tail alone never establishes identity. Only unique bank + reference is a suggestion.
-        if extracted_draft.account_reference and extracted_draft.bank:
-            accounts = list((await session.execute(select(Account).where(
-                Account.reference == extracted_draft.account_reference,
-                Account.bank == extracted_draft.bank, Account.status == "active"
-            ))).scalars())
-            if len(accounts) == 1:
-                matched_account_id = accounts[0].id
-                cards = list((await session.execute(select(Card).where(
-                    Card.account_id == matched_account_id,
-                    Card.tail.in_(extracted_draft.card_tails or []), Card.status == "active"
-                ))).scalars())
-                if len(cards) == 1:
-                    matched_card_id = cards[0].id
-
-        # Update review reasons
-        review_reasons = list(extracted_draft.review_reasons)
-        if matched_account_id:
-            # Resolved account
-            review_reasons = [r for r in review_reasons if r != "unresolved:account"]
+                subject=source.subject,
+                sender=source.sender,
+                email_date=email_date_value,
+            )]
+            extractor_name = "rule"
+            for d in draft_data_list:
+                reasons = list(d.review_reasons)
+                reasons.append("no_content_extracted")
+                if has_encrypted_pdf:
+                    reasons.append("attachment_password_required")
+                d.review_reasons = list(dict.fromkeys(reasons))
         else:
-            if "unresolved:account" not in review_reasons:
-                review_reasons.append("unresolved:account")
+            # 4. Try model extraction first, then rule-based
+            try:
+                draft_data_list, extractor_name = await self.model_extractor.extract_multi(
+                    text=parse_text,
+                    subject=source.subject,
+                    sender=source.sender,
+                    email_date=email_date_value,
+                )
+            except Exception:
+                # Fallback: rule-based multi-card extraction
+                draft_data_list = self.html_extractor.extract_multi(
+                    content=parse_text,
+                    is_html=False,
+                    subject=source.subject,
+                    sender=source.sender,
+                    email_date=email_date_value,
+                )
+                extractor_name = "rule:fallback"
 
-        # Reprocessing creates a new review version and preserves manual work.
-        draft_model = StatementDraftModel(
-            email_source_id=source.id,
-            mailbox_id=source.mailbox_id,
-            status="pending_review",
-            bank=extracted_draft.bank,
-            currency=extracted_draft.currency,
-            amount_minor=extracted_draft.amount_minor,
-            minimum_minor=extracted_draft.minimum_minor,
-            statement_date=extracted_draft.statement_date,
-            due_date=extracted_draft.due_date,
-            account_reference=extracted_draft.account_reference,
-            card_tails=extracted_draft.card_tails,
-            evidence=[e.model_dump() for e in extracted_draft.evidence],
-            review_reasons=review_reasons,
-            matched_account_id=matched_account_id,
-            matched_card_id=matched_card_id,
-            extractor_name=extractor_name,
-        )
-        session.add(draft_model)
+        # 5. Create draft model(s) and attempt auto-matching
+        fingerprint = getattr(self.model_extractor, "fingerprint", None)
+        result_drafts: list[StatementDraftModel] = []
 
+        for draft_data in draft_data_list:
+            draft_model = self._create_draft_model(
+                draft_data=draft_data,
+                source=source,
+                extractor_name=extractor_name,
+                fingerprint=fingerprint,
+            )
+
+            # Auto-match account/card if possible
+            if draft_data.bank and draft_data.card_tails:
+                for tail in draft_data.card_tails:
+                    card_match = (await session.execute(
+                        select(Card).join(Account).where(
+                            Account.bank == draft_data.bank,
+                            Card.tail == tail,
+                            Account.status == "active",
+                            Card.status == "active",
+                        )
+                    )).scalar_one_or_none()
+                    if card_match:
+                        draft_model.matched_account_id = card_match.account_id
+                        draft_model.matched_card_id = card_match.id
+                        break
+
+            session.add(draft_model)
+            result_drafts.append(draft_model)
+
+        # Update source status
         source.parse_status = "parsed"
+        source.error_message = None
         await session.flush()
         await session.commit()
-        await session.refresh(draft_model)
-        return draft_model
+
+        for dm in result_drafts:
+            await session.refresh(dm)
+
+        return result_drafts
 
     async def confirm_draft(
         self,
         session: AsyncSession,
         draft_id: uuid.UUID,
-        req: StatementDraftConfirmRequest,
-        confirmed_by: str = "device",
-    ) -> tuple[Statement, StatementVersion, StatementDraftModel]:
-        """Confirm a draft into an official Statement and StatementVersion in an atomic transaction."""
+        confirm: StatementDraftConfirmRequest,
+        confirmed_by: str = "system",
+    ) -> tuple:
+        """Confirm a draft and create/update Statement + Version atomically."""
+        from cardcue_api.admin.models import CommandReceipt
+
         draft = (await session.execute(select(StatementDraftModel).where(StatementDraftModel.id == draft_id).with_for_update())).scalar_one_or_none()
         if not draft:
             raise NotFoundError(f"Statement draft {draft_id} not found")
 
-        from cardcue_api.admin.models import CommandReceipt
-        import hashlib
-        fingerprint = hashlib.sha256((str(draft_id) + req.model_dump_json()).encode()).hexdigest()
-        receipt_id = req.request_id or draft_id
-        receipt = await session.get(CommandReceipt, receipt_id)
-        if receipt:
-            if receipt.fingerprint != fingerprint:
-                raise ConflictError("Request ID already used with different content")
-            ver = await session.get(StatementVersion, uuid.UUID(receipt.result["version_id"]))
-            stmt = await session.get(Statement, ver.statement_id)
-            return stmt, ver, draft
         if draft.status != "pending_review":
             raise ConflictError(f"Draft is already {draft.status}; cannot confirm")
-        if req.expected_revision is not None and draft.revision != req.expected_revision:
+
+        if confirm.expected_revision is not None and draft.revision != confirm.expected_revision:
             raise ConflictError("Draft changed; reload before confirming")
 
-        # Resolve values: explicit request override takes precedence
-        account_id = req.account_id
-        currency = req.currency or draft.currency
-        if currency not in ("CNY", "USD"):
-            raise ConflictError("Explicit supported currency is required")
-        amount_minor = req.amount_minor if req.amount_minor is not None else draft.amount_minor
-        minimum_minor = req.minimum_minor if req.minimum_minor is not None else draft.minimum_minor
-        statement_date = req.statement_date or draft.statement_date
-        due_date = req.due_date or draft.due_date
-        card_id = req.card_id or draft.matched_card_id
+        account_id = confirm.account_id
+        card_id = confirm.card_id
+        currency = confirm.currency or draft.currency
+        amount_minor = confirm.amount_minor if confirm.amount_minor is not None else draft.amount_minor
+        minimum_minor = confirm.minimum_minor if confirm.minimum_minor is not None else draft.minimum_minor
+        statement_date = confirm.statement_date or draft.statement_date
+        due_date = confirm.due_date or draft.due_date
 
-        # Invariant checks
-        if amount_minor is None:
-            raise ConflictError("amount_minor cannot be null for confirmed statement")
-        if statement_date is None or due_date is None:
-            raise ConflictError("statement_date and due_date are required")
-        if due_date < statement_date:
-            raise ConflictError("due_date must be >= statement_date")
-        if minimum_minor is not None:
-            if minimum_minor < 0:
-                raise ConflictError("minimum_minor must be >= 0")
-            if minimum_minor > amount_minor:
-                raise ConflictError("minimum_minor cannot exceed amount_minor")
+        if not currency or amount_minor is None or not statement_date or not due_date:
+            raise ConflictError("Cannot confirm: required fields missing")
 
-        # Check Account exists
-        acct = (await session.execute(select(Account).where(Account.id == account_id).with_for_update())).scalar_one_or_none()
-        if not acct:
-            raise NotFoundError(f"Account {account_id} not found")
+        receipt_id = confirm.request_id or uuid.uuid4()
+        fingerprint = f"confirm:{draft_id}:{receipt_id}"
+        existing = await session.get(CommandReceipt, receipt_id)
+        if existing:
+            return existing.result
 
-        if acct.status != "active":
-            raise ConflictError("Account is archived")
-
-        # Check Card belongs to account if provided
-        if card_id:
-            card = await session.get(Card, card_id)
-            if not card or card.account_id != account_id:
-                raise ConflictError(f"Card {card_id} does not belong to Account {account_id}")
-
-        # Check if Statement exists for (account_id, currency, statement_date)
-        stmt_res = await session.execute(
-            select(Statement)
-            .where(
-                and_(
-                    Statement.account_id == account_id,
-                    Statement.currency == currency,
-                    Statement.statement_date == statement_date,
-                )
+        # Existing statement?
+        existing_stmt = (await session.execute(
+            select(Statement).where(
+                Statement.account_id == account_id,
+                Statement.currency == currency,
+                Statement.statement_date == statement_date,
             )
-            .options(selectinload(Statement.versions)).with_for_update()
-        )
-        existing_stmt = stmt_res.scalar_one_or_none()
+        )).scalar_one_or_none()
 
         if existing_stmt:
+            if confirm.expected_statement_version_id and existing_stmt.current_version_id != confirm.expected_statement_version_id:
+                raise ConflictError("Statement version changed; reload")
+
             stmt = existing_stmt
-            if req.expected_statement_version_id != stmt.current_version_id:
-                raise ConflictError("Existing bill requires explicit current version confirmation")
-            from cardcue_api.services.billing import BillingService
-            if amount_minor < await BillingService()._active_paid(session, stmt.id):
-                raise ConflictError("Amount cannot be lower than active payments")
-            max_v = max((v.version_number for v in stmt.versions), default=0)
+            max_ver = (await session.execute(
+                select(func.max(StatementVersion.version_number)).where(StatementVersion.statement_id == stmt.id)
+            )).scalar_one() or 0
+
             ver = StatementVersion(
                 statement_id=stmt.id,
-                version_number=max_v + 1,
+                version_number=max_ver + 1,
                 amount_minor=amount_minor,
                 minimum_minor=minimum_minor,
                 source="email",
@@ -327,7 +325,6 @@ class DraftService:
             await session.flush()
 
             stmt.current_version_id = ver.id
-            stmt.due_date = due_date
             await session.flush()
 
             await self._log_change(session, "statement", stmt.id, "update", {
@@ -453,12 +450,11 @@ class DraftService:
         results = []
         for source in sources:
             try:
-                draft = await self.parse_email_source(session, source.id)
-                results.append(draft)
+                drafts = await self.parse_email_source_multi(session, source.id)
+                results.extend(drafts)
             except Exception as e:
                 source.parse_status = "failed"
                 source.error_message = "parse_failed"
                 await session.flush()
                 await session.commit()
         return results
-

@@ -13,7 +13,9 @@ from cardcue_api.parsing.evidence import (
     sanitize_text,
 )
 from cardcue_api.parsing.html_extractor import HtmlStatementExtractor
-from cardcue_api.parsing.model_adapter import ModelStatementExtractor, parse_model_response
+from unittest.mock import patch
+from unittest.mock import patch
+from cardcue_api.parsing.model_adapter import ModelStatementExtractor, parse_model_response, parse_model_response_multi, parse_model_response_multi
 from cardcue_api.parsing.pdf_extractor import PdfStatementExtractor
 
 
@@ -259,31 +261,37 @@ def test_pdf_extractor_oversized_guard():
 # ---------------------------------------------------------------------------
 
 async def test_model_adapter_rule_fallback_when_no_key():
-    adapter = ModelStatementExtractor(api_key="")
-    sample_text = "招商银行信用卡电子账单 本期应还金额：￥8,800.00 到期还款日：2026-10-15"
-    draft, extractor_name = await adapter.extract(sample_text)
+    with patch("cardcue_api.parsing.model_adapter.settings") as mock_settings:
+        mock_settings.llm_api_key = None
+        mock_settings.LLM_API_KEY = None
+        adapter = ModelStatementExtractor(api_key=None)
+        sample_text = "招商银行信用卡电子账单 本期应还金额：￥8,800.00 到期还款日：2026-10-15"
+        draft, extractor_name = await adapter.extract(sample_text)
 
-    assert extractor_name == "rule"
-    assert draft.bank == "招商银行"
-    assert draft.amount_minor == 880000
-    assert draft.due_date == date(2026, 10, 15)
+        assert extractor_name == "rule"
+        assert draft.bank == "招商银行"
+        assert draft.amount_minor == 880000
+        assert draft.due_date == date(2026, 10, 15)
 
 
 async def test_model_adapter_fingerprint_caching():
-    adapter = ModelStatementExtractor(api_key="")
-    sample_text = "中国建设银行信用卡对账单 本期应还款额：1,500.00 到期还款日：2026-10-20"
-    
-    draft1, mode1 = await adapter.extract(sample_text)
-    fp = adapter.compute_fingerprint(sample_text)
-    assert fp is not None
-    assert len(fp) == 64  # SHA-256 length
+    with patch("cardcue_api.parsing.model_adapter.settings") as mock_settings:
+        mock_settings.llm_api_key = None
+        mock_settings.LLM_API_KEY = None
+        adapter = ModelStatementExtractor(api_key=None)
+        sample_text = "中国建设银行信用卡对账单 本期应还款额：1,500.00 到期还款日：2026-10-20"
 
-    # Seed fingerprint cache manually
-    adapter._fingerprint_cache[fp] = draft1
+        draft1, mode1 = await adapter.extract(sample_text)
+        fp = adapter.compute_fingerprint(sample_text)
+        assert fp is not None
+        assert len(fp) == 64  # SHA-256 length
 
-    draft2, mode2 = await adapter.extract(sample_text)
-    assert mode2 == "model:cached"
-    assert draft2 == draft1
+        # Seed fingerprint cache manually
+        adapter._fingerprint_cache[fp] = [draft1]
+
+        draft2, mode2 = await adapter.extract(sample_text)
+        assert mode2 == "model:cached"
+        assert draft2 == draft1
 
 
 def test_storage_expiration_and_cleanup(tmp_path):
@@ -429,3 +437,175 @@ def test_parse_model_response_invalid_json_raises():
     import json
     with pytest.raises((json.JSONDecodeError, ValueError)):
         parse_model_response("This is not JSON content at all")
+
+
+# ---------------------------------------------------------------------------
+# Multi-Card Extraction Tests (CCB-style emails)
+# ---------------------------------------------------------------------------
+
+def test_html_extractor_ccb_multi_card():
+    """CCB email with per-card table should produce multiple drafts."""
+    extractor = HtmlStatementExtractor()
+    text_content = (
+        "中国建设银行信用卡电子账单\n"
+        "账单日：2026-09-13\n"
+        "到期还款日：2026-10-02\n"
+        "\n"
+        "信用卡卡号          账户币种       应还金额/溢缴款   最低还款额\n"
+        "53169300****7008    人民币(CNY)    27.10              27.10\n"
+        "62596541****6259    人民币(CNY)    46.64              46.64\n"
+    )
+    drafts = extractor.extract_multi(
+        content=text_content,
+        is_html=False,
+        subject="中国建设银行信用卡电子账单",
+        sender="service@vip.ccb.com",
+    )
+
+    assert len(drafts) == 2
+
+    # Both drafts share bank and dates
+    for d in drafts:
+        assert d.bank == "中国建设银行"
+        assert d.statement_date == date(2026, 9, 13)
+        assert d.due_date == date(2026, 10, 2)
+        assert d.currency == "CNY"
+
+    # Card-specific fields
+    tails = [d.card_tails for d in drafts]
+    amounts = [d.amount_minor for d in drafts]
+    minimums = [d.minimum_minor for d in drafts]
+
+    assert ["7008"] in tails
+    assert ["6259"] in tails
+    assert 2710 in amounts
+    assert 4664 in amounts
+    assert 2710 in minimums
+    assert 4664 in minimums
+
+
+def test_html_extractor_single_card_no_multi():
+    """A single-card CCB email should still return one draft, not trigger multi-card."""
+    extractor = HtmlStatementExtractor()
+    text_content = (
+        "中国建设银行信用卡电子账单\n"
+        "账单日：2026-09-13\n"
+        "到期还款日：2026-10-02\n"
+        "\n"
+        "信用卡卡号          账户币种       应还金额/溢缴款   最低还款额\n"
+        "53169300****7008    人民币(CNY)    27.10              27.10\n"
+    )
+    drafts = extractor.extract_multi(
+        content=text_content,
+        is_html=False,
+        subject="中国建设银行信用卡电子账单",
+        sender="service@vip.ccb.com",
+    )
+
+    assert len(drafts) == 1
+    assert drafts[0].bank == "中国建设银行"
+
+
+def test_parse_model_response_multi_card_json():
+    """Multi-card JSON format with 'cards' array should return multiple drafts."""
+    raw_output = """
+    {
+      "bank": "中国建设银行",
+      "statement_date": "2026-09-13",
+      "due_date": "2026-10-02",
+      "cards": [
+        {
+          "card_tails": ["7008"],
+          "currency": "CNY",
+          "amount_minor": 2710,
+          "minimum_minor": 2710,
+          "evidence": [
+            {"field": "card_tails", "excerpt": "53169300****7008"},
+            {"field": "amount_minor", "excerpt": "27.10"}
+          ]
+        },
+        {
+          "card_tails": ["6259"],
+          "currency": "CNY",
+          "amount_minor": 4664,
+          "minimum_minor": 4664,
+          "evidence": [
+            {"field": "card_tails", "excerpt": "62596541****6259"},
+            {"field": "amount_minor", "excerpt": "46.64"}
+          ]
+        }
+      ],
+      "evidence": [
+        {"field": "bank", "excerpt": "中国建设银行"},
+        {"field": "statement_date", "excerpt": "2026-09-13"},
+        {"field": "due_date", "excerpt": "2026-10-02"}
+      ]
+    }
+    """
+    drafts = parse_model_response_multi(raw_output)
+
+    assert len(drafts) == 2
+
+    for d in drafts:
+        assert d.bank == "中国建设银行"
+        assert d.statement_date == date(2026, 9, 13)
+        assert d.due_date == date(2026, 10, 2)
+        assert d.currency == "CNY"
+
+    tails = [d.card_tails for d in drafts]
+    assert ["7008"] in tails
+    assert ["6259"] in tails
+
+    d7008 = next(d for d in drafts if "7008" in d.card_tails)
+    d6259 = next(d for d in drafts if "6259" in d.card_tails)
+    assert d7008.amount_minor == 2710
+    assert d6259.amount_minor == 4664
+
+
+def test_parse_model_response_multi_single_card_backwards_compat():
+    """Single-card JSON should still work via parse_model_response_multi."""
+    raw_output = """
+    {
+      "bank": "招商银行",
+      "card_tails": ["1234"],
+      "currency": "CNY",
+      "amount_minor": 1582050,
+      "minimum_minor": 158200,
+      "statement_date": "2026-09-18",
+      "due_date": "2026-10-06",
+      "evidence": [
+        {"field": "amount_minor", "excerpt": "15,820.50"}
+      ]
+    }
+    """
+    drafts = parse_model_response_multi(raw_output)
+
+    assert len(drafts) == 1
+    assert drafts[0].bank == "招商银行"
+    assert drafts[0].card_tails == ["1234"]
+    assert drafts[0].amount_minor == 1582050
+
+
+def test_html_extractor_ccb_multi_card_amounts_are_integers():
+    """Multi-card extraction must produce integer minor amounts, never floats."""
+    extractor = HtmlStatementExtractor()
+    text_content = (
+        "中国建设银行信用卡电子账单\n"
+        "账单日：2026-09-13\n"
+        "到期还款日：2026-10-02\n"
+        "\n"
+        "信用卡卡号          账户币种       应还金额/溢缴款   最低还款额\n"
+        "53169300****7008    人民币(CNY)    27.10              27.10\n"
+        "62596541****6259    人民币(CNY)    46.64              46.64\n"
+    )
+    drafts = extractor.extract_multi(
+        content=text_content,
+        is_html=False,
+        subject="中国建设银行信用卡电子账单",
+        sender="service@vip.ccb.com",
+    )
+
+    for d in drafts:
+        assert isinstance(d.amount_minor, int), f"amount_minor must be int, got {type(d.amount_minor)}"
+        if d.minimum_minor is not None:
+            assert isinstance(d.minimum_minor, int), f"minimum_minor must be int, got {type(d.minimum_minor)}"

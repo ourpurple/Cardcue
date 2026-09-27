@@ -8,11 +8,11 @@ from cardcue_api.admin.outbound import post_json
 from cardcue_api.admin.security import now
 from cardcue_api.contracts import StatementDraft
 from cardcue_api.mail.crypto import decrypt_token
-from cardcue_api.parsing.model_adapter import SYSTEM_PROMPT, parse_model_response
+from cardcue_api.parsing.model_adapter import SYSTEM_PROMPT, parse_model_response, parse_model_response_multi
 from cardcue_api.parsing.html_extractor import HtmlStatementExtractor
 from cardcue_api.persistence.database import async_session_factory
 
-PROMPT_VERSION = "web-1-no-date-guess"
+PROMPT_VERSION = "web-2-multi-card"
 
 class ManagedExtractor:
     def __init__(self, revision: ModelRevision | None, force=False):
@@ -20,7 +20,14 @@ class ManagedExtractor:
         self.force = force
         self.usage = None
         self.fingerprint = None
+
     async def extract(self, text: str, subject="", sender="", email_date=None):
+        """Extract a single draft (backwards compatible). Returns (StatementDraft, extractor_name)."""
+        drafts, extractor_name = await self.extract_multi(text, subject=subject, sender=sender, email_date=email_date)
+        return drafts[0], extractor_name
+
+    async def extract_multi(self, text: str, subject="", sender="", email_date=None):
+        """Extract one or more drafts. Returns (list[StatementDraft], extractor_name)."""
         if self.revision is None:
             try:
                 import uuid
@@ -37,9 +44,10 @@ class ManagedExtractor:
             except Exception:
                 pass
         if self.revision is None:
-            draft = HtmlStatementExtractor().extract(text, is_html=False, subject=subject, sender=sender, email_date=email_date)
-            draft.review_reasons = list(dict.fromkeys([*draft.review_reasons, "rule_only:no_active_model"]))
-            return draft, "rule"
+            drafts = HtmlStatementExtractor().extract_multi(text, is_html=False, subject=subject, sender=sender, email_date=email_date)
+            for d in drafts:
+                d.review_reasons = list(dict.fromkeys([*d.review_reasons, "rule_only:no_active_model"]))
+            return drafts, "rule"
         params = self.revision.parameters
         if len(text) > params["input_limit"]:
             raise ValueError("input_exceeds_limit_manual_review_required")
@@ -49,8 +57,12 @@ class ManagedExtractor:
         async with async_session_factory() as session:
             cached = await session.get(RuntimeSettings, cache_key)
             if cached and not self.force:
-                # strict JSON validation parses ISO dates without coercing money from floats.
-                return StatementDraft.model_validate_json(json.dumps(cached.value)), "model:cached"
+                cached_value = cached.value
+                # Support both single-draft and multi-draft cache formats
+                if isinstance(cached_value, list):
+                    return [StatementDraft.model_validate_json(json.dumps(item)) for item in cached_value], "model:cached"
+                else:
+                    return [StatementDraft.model_validate_json(json.dumps(cached_value))], "model:cached"
         url = params["base_url"].rstrip("/")
         if not url.endswith("/chat/completions"):
             url += "/chat/completions"
@@ -80,23 +92,27 @@ class ManagedExtractor:
                 if choice.get("finish_reason") not in (None, "stop"):
                     raise ValueError("incomplete_model_response")
                 raw = choice["message"]["content"]
-                result = parse_model_response(raw, email_date=None)
+                results = parse_model_response_multi(raw, email_date=None)
                 # Evidence must be an actual excerpt of the submitted data, not invented prose.
                 corpus = text + "\n" + subject + "\n" + sender
-                result.evidence = [e for e in result.evidence if e.excerpt in corpus]
-                result = StatementDraft.model_validate_json(result.model_dump_json())
+                for result in results:
+                    result.evidence = [e for e in result.evidence if e.excerpt in corpus]
+                    result = StatementDraft.model_validate_json(result.model_dump_json())
+                # Re-validate all drafts
+                results = [StatementDraft.model_validate_json(r.model_dump_json()) for r in results]
                 usage = data.get("usage") or {}
                 self.usage = {k: v for k, v in usage.items() if k in ("prompt_tokens", "completion_tokens", "total_tokens") and type(v) is int and v >= 0}
                 async with async_session_factory() as session:
                     call = await session.get(ModelCall, call_id)
                     call.status, call.usage = "succeeded", self.usage
+                    cache_value = [r.model_dump(mode="json") for r in results]
                     cached = await session.get(RuntimeSettings, cache_key)
                     if cached:
-                        cached.value = result.model_dump(mode="json")
+                        cached.value = cache_value
                     else:
-                        session.add(RuntimeSettings(key=cache_key, value=result.model_dump(mode="json")))
+                        session.add(RuntimeSettings(key=cache_key, value=cache_value))
                     await session.commit()
-                return result, "model"
+                return results, "model"
             except Exception as exc:
                 code = str(exc) if str(exc) in ("provider_http_429", "provider_http_503") else "model_failed_or_outcome_unknown"
                 async with async_session_factory() as session:

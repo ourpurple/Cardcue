@@ -46,7 +46,7 @@ AMOUNT_PATTERNS = [
 
 # Minimum payment patterns
 MINIMUM_PATTERNS = [
-    r"(?:本期)?(?:最低还款额|最低应还|最低还款|Minimum Payment Due|Minimum Due)[:：\s]*[¥￥$]?\s*([0-9,]+(?:\.[0-9]{1,2})?)",
+    r"(?:本期)?(?:最低还款额|最低应还|最低还款|Minimum Payment Due|Minimum Due|Min\.?Payment)[:：\s]*[¥￥$]?\s*([0-9,]+(?:\.[0-9]{1,2})?)",
 ]
 
 # Due date patterns
@@ -70,6 +70,38 @@ CARD_TAIL_PATTERNS = [
 ACCOUNT_REF_PATTERNS = [
     r"(?:账号|账户号|客户号|Account No)[:：\s]*([A-Za-z0-9\-_*]{6,25})",
 ]
+
+# ---------------------------------------------------------------------------
+# Multi-card table patterns for CCB-style emails
+# ---------------------------------------------------------------------------
+
+# CCB per-card table row: card_number  currency  new_balance  min_payment  ...
+# e.g. "53169300****7008	人民币(CNY)	27.10	27.10	..."
+# Each row may have: full_card_number  currency  new_balance  min_payment  [currency2  new_balance2  min_payment2]
+_CCB_TABLE_ROW = re.compile(
+    r"(\d{8,}\*{3,4}\d{4})"        # full card number with mask
+    r"\s+"
+    r"([^\t\n]+?)"                   # currency text (e.g. 人民币(CNY))
+    r"\s+"
+    r"(-?[0-9,]+(?:\.[0-9]{1,2})?)" # new balance / 应还金额
+    r"\s+"
+    r"(-?[0-9,]+(?:\.[0-9]{1,2})?)" # min payment / 最低还款额
+)
+
+def _extract_tail_from_masked(card_number: str) -> str | None:
+    """Extract last 4 digits from a masked card number like 53169300****7008."""
+    m = re.search(r"(\d{4})\s*$", card_number)
+    return m.group(1) if m else None
+
+
+def _parse_ccb_currency(text: str) -> str | None:
+    """Parse currency from CCB table cell like '人民币(CNY)' or 'USD'."""
+    text = text.strip()
+    if re.search(r"(人民币|CNY|RMB)", text, re.IGNORECASE):
+        return "CNY"
+    if re.search(r"(美元|USD)", text, re.IGNORECASE):
+        return "USD"
+    return None
 
 
 class HtmlStatementExtractor:
@@ -100,22 +132,17 @@ class HtmlStatementExtractor:
             text = re.sub(r"<[^>]+>", " ", html_content)
             return sanitize_text(text)
 
-    def extract(
+    def _extract_shared_fields(
         self,
-        content: str,
-        is_html: bool = True,
-        subject: str = "",
-        sender: str = "",
+        text: str,
+        full_text: str,
         email_date: date | None = None,
-    ) -> StatementDraft:
-        """Extract statement draft fields and verbatim evidence."""
-        text = self.html_to_text(content) if is_html else sanitize_text(content)
-        evidence_list: list[Evidence] = []
-        review_reasons: list[str] = []
+    ) -> dict:
+        """Extract bank, currency, dates, card tails, account ref from text.
 
-        # Full searchable corpus includes subject + sender + body text
-        header_text = f"Subject: {subject}\nSender: {sender}\n"
-        full_text = header_text + text
+        Returns a dict of the extracted values and evidence list.
+        """
+        evidence_list: list[Evidence] = []
 
         # 1. Bank
         bank_val = None
@@ -188,13 +215,15 @@ class HtmlStatementExtractor:
 
         # 7. Card Tails
         card_tails: list[str] = []
+        card_tails_evidence: list[Evidence] = []
         for pat in CARD_TAIL_PATTERNS:
             for m in re.finditer(pat, text, re.IGNORECASE):
                 tail = m.group(1)
                 if len(tail) == 4 and tail.isdigit() and tail not in card_tails:
                     card_tails.append(tail)
                     excerpt = extract_excerpt(text, m.start(), m.end())
-                    evidence_list.append(Evidence(field="card_tails", excerpt=excerpt))
+                    card_tails_evidence.append(Evidence(field="card_tails", excerpt=excerpt))
+        evidence_list.extend(card_tails_evidence)
 
         # 8. Account Reference
         account_ref = None
@@ -206,17 +235,136 @@ class HtmlStatementExtractor:
                 evidence_list.append(Evidence(field="account_reference", excerpt=excerpt))
                 break
 
-        # Build draft with automatic validation
+        return {
+            "bank": bank_val,
+            "currency": currency_val,
+            "amount_minor": amount_minor,
+            "minimum_minor": minimum_minor,
+            "due_date": due_date,
+            "statement_date": statement_date,
+            "card_tails": card_tails,
+            "account_ref": account_ref,
+            "evidence": evidence_list,
+        }
+
+    def _try_extract_multi_card_table(
+        self,
+        text: str,
+        email_date: date | None = None,
+    ) -> list[dict] | None:
+        """Try to extract a per-card breakdown table (e.g. CCB format).
+
+        Returns a list of per-card dicts with keys:
+            card_tail, currency, amount_minor, minimum_minor, evidence
+        or None if no multi-card table is found.
+        """
+        rows = _CCB_TABLE_ROW.findall(text)
+        if len(rows) < 2:
+            return None
+
+        cards: list[dict] = []
+        seen_tails: set[str] = set()
+        for full_card, currency_text, amount_text, min_text in rows:
+            tail = _extract_tail_from_masked(full_card)
+            if not tail or tail in seen_tails:
+                continue
+            seen_tails.add(tail)
+            currency = _parse_ccb_currency(currency_text)
+            amount_minor = parse_amount_to_minor(amount_text)
+            minimum_minor = parse_amount_to_minor(min_text)
+
+            # Build per-card evidence
+            card_evidence: list[Evidence] = []
+            # Find the row in the original text for evidence excerpt
+            row_match = re.search(re.escape(full_card) + r".*?" + re.escape(amount_text), text, re.DOTALL)
+            if row_match:
+                excerpt = extract_excerpt(text, row_match.start(), row_match.end())
+                card_evidence.append(Evidence(field="card_tails", excerpt=excerpt))
+                card_evidence.append(Evidence(field="amount_minor", excerpt=excerpt))
+                if currency:
+                    card_evidence.append(Evidence(field="currency", excerpt=excerpt))
+                if minimum_minor is not None:
+                    card_evidence.append(Evidence(field="minimum_minor", excerpt=excerpt))
+
+            cards.append({
+                "card_tail": tail,
+                "currency": currency,
+                "amount_minor": amount_minor,
+                "minimum_minor": minimum_minor,
+                "evidence": card_evidence,
+            })
+
+        return cards if len(cards) >= 2 else None
+
+    def extract(
+        self,
+        content: str,
+        is_html: bool = True,
+        subject: str = "",
+        sender: str = "",
+        email_date: date | None = None,
+    ) -> StatementDraft:
+        """Extract statement draft fields and verbatim evidence.
+
+        Returns a single StatementDraft. For multi-card emails, use extract_multi().
+        """
+        drafts = self.extract_multi(content, is_html=is_html, subject=subject, sender=sender, email_date=email_date)
+        return drafts[0]
+
+    def extract_multi(
+        self,
+        content: str,
+        is_html: bool = True,
+        subject: str = "",
+        sender: str = "",
+        email_date: date | None = None,
+    ) -> list[StatementDraft]:
+        """Extract one or more statement drafts from an email.
+
+        Returns multiple StatementDraft instances when the email contains a
+        per-card breakdown table (e.g. CCB emails listing each card's balance).
+        """
+        text = self.html_to_text(content) if is_html else sanitize_text(content)
+
+        # Full searchable corpus includes subject + sender + body text
+        header_text = f"Subject: {subject}\nSender: {sender}\n"
+        full_text = header_text + text
+
+        shared = self._extract_shared_fields(text, full_text, email_date)
+
+        # Try multi-card table extraction
+        multi_cards = self._try_extract_multi_card_table(text, email_date)
+        if multi_cards:
+            # Build separate drafts for each card, inheriting shared fields
+            drafts: list[StatementDraft] = []
+            # Shared evidence: bank, statement_date, due_date only
+            shared_evidence = [e for e in shared["evidence"] if e.field in ("bank", "statement_date", "due_date")]
+            for card_info in multi_cards:
+                card_evidence = list(shared_evidence) + card_info["evidence"]
+                draft = StatementDraft(
+                    bank=shared["bank"],
+                    account_reference=shared["account_ref"],
+                    card_tails=[card_info["card_tail"]],
+                    currency=card_info["currency"] or shared["currency"],
+                    amount_minor=card_info["amount_minor"],
+                    minimum_minor=card_info["minimum_minor"],
+                    statement_date=shared["statement_date"],
+                    due_date=shared["due_date"],
+                    evidence=card_evidence,
+                )
+                drafts.append(draft)
+            return drafts
+
+        # Single-card path
         draft = StatementDraft(
-            bank=bank_val,
-            account_reference=account_ref,
-            card_tails=card_tails,
-            currency=currency_val,
-            amount_minor=amount_minor,
-            minimum_minor=minimum_minor,
-            statement_date=statement_date,
-            due_date=due_date,
-            evidence=evidence_list,
-            review_reasons=review_reasons,
+            bank=shared["bank"],
+            account_reference=shared["account_ref"],
+            card_tails=shared["card_tails"],
+            currency=shared["currency"],
+            amount_minor=shared["amount_minor"],
+            minimum_minor=shared["minimum_minor"],
+            statement_date=shared["statement_date"],
+            due_date=shared["due_date"],
+            evidence=shared["evidence"],
         )
-        return draft
+        return [draft]
