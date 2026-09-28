@@ -29,9 +29,9 @@ import {
   EditOutlined,
   RollbackOutlined,
 } from '@ant-design/icons';
-import { statementsApi, accountsApi } from '../api';
+import { statementsApi, accountsApi, draftsApi } from '../api';
 import { CurrencyAmount, centsToYuanString, yuanStringToCents } from '../components/CurrencyAmount';
-import { StatementListItem, StatementDetailData, BankAccount } from '../types';
+import { StatementListItem, StatementDetailData, BankAccount, StatementDraftItem, StatementDraftDetail, TransactionDetail } from '../types';
 import { getBankShort, formatBankHolderTails, cleanAccountAlias } from '../utils/bankDisplay';
 
 const { Text, Title, Paragraph } = Typography;
@@ -65,6 +65,20 @@ export const Statements: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [currentDetail, setCurrentDetail] = useState<StatementDetailData | null>(null);
 
+  // Detail-only completion never changes a statement version or a payment.
+  const [completionVisible, setCompletionVisible] = useState(false);
+  const [completionLoading, setCompletionLoading] = useState(false);
+  const [candidateDrafts, setCandidateDrafts] = useState<StatementDraftItem[]>([]);
+  const [manualDraftId, setManualDraftId] = useState('');
+  const [completionDraft, setCompletionDraft] = useState<StatementDraftDetail | null>(null);
+  const [selectedDetailRows, setSelectedDetailRows] = useState<string[]>([]);
+  const [expectedDetailCount, setExpectedDetailCount] = useState('');
+  const [replaceDetails, setReplaceDetails] = useState(false);
+  const [markDetailsComplete, setMarkDetailsComplete] = useState(false);
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [historyRows, setHistoryRows] = useState<TransactionDetail[]>([]);
+  const [historyTitle, setHistoryTitle] = useState('');
+  const [historyLoading, setHistoryLoading] = useState(false);
   // Correct modal state
   const [correctModalVisible, setCorrectModalVisible] = useState(false);
   const [correctLoading, setCorrectLoading] = useState(false);
@@ -133,6 +147,121 @@ export const Statements: React.FC = () => {
     }
   };
 
+  const openCompletion = async () => {
+    if (!currentDetail) return;
+    setCompletionVisible(true);
+    setCompletionDraft(null);
+    setManualDraftId('');
+    setCandidateDrafts([]);
+    setSelectedDetailRows([]);
+    setExpectedDetailCount('');
+    setReplaceDetails(false);
+    setMarkDetailsComplete(false);
+    setCompletionLoading(true);
+    try {
+      const response = await draftsApi.listDrafts({ page: 1, size: 100, status: 'pending_review' });
+      const candidates: StatementDraftItem[] = response.data?.items || [];
+      setCandidateDrafts(candidates.filter(d =>
+        d.currency === currentDetail.currency && d.statement_date === currentDetail.statement_date &&
+        d.bank != null && getBankShort(d.bank) === getBankShort(currentDetail.bank) &&
+        (d.matched_account_id == null || d.matched_account_id === currentDetail.account_id) &&
+        (d.amount_minor == null || d.amount_minor === currentDetail.amount_minor)));
+      if (response.data?.total > 100) message.info('候选仅展示最近 100 条草稿；更早草稿可在下方输入草稿 ID 核对');
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '无法加载待审核草稿');
+    } finally {
+      setCompletionLoading(false);
+    }
+  };
+
+  const selectCompletionDraft = async (draftId: string) => {
+    setCompletionDraft(null);
+    setSelectedDetailRows([]);
+    setMarkDetailsComplete(false);
+    setCompletionLoading(true);
+    try {
+      const response = await draftsApi.getDraft(draftId);
+      const draft: StatementDraftDetail = response.data;
+      if (draft.status !== 'pending_review') {
+        message.error('草稿已经处理，请刷新');
+        return;
+      }
+      if (!currentDetail || getBankShort(draft.bank || '') !== getBankShort(currentDetail.bank) ||
+          (draft.matched_account_id && draft.matched_account_id !== currentDetail.account_id) ||
+          draft.currency !== currentDetail.currency || draft.statement_date !== currentDetail.statement_date ||
+          draft.due_date !== currentDetail.due_date || draft.amount_minor !== currentDetail.amount_minor ||
+          draft.card_tails.some(tail => !currentDetail.card_tails?.includes(tail))) {
+        message.error('草稿与当前账单的账户、卡片或汇总不一致，不能仅补明细');
+        return;
+      }
+      setCompletionDraft(draft);
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '草稿加载失败');
+    } finally {
+      setCompletionLoading(false);
+    }
+  };
+
+  const submitCompletion = async () => {
+    if (!currentDetail?.current_version_id || !completionDraft || !selectedDetailRows.length) {
+      message.error('请先选择草稿并勾选已核对的交易');
+      return;
+    }
+    const countText = expectedDetailCount.trim();
+    if (countText && (!/^\d+$/.test(countText) || Number(countText) < 1 || Number(countText) > 10000)) {
+      message.error('来源预期笔数须为 1～10000 的整数');
+      return;
+    }
+    const totalRows = selectedDetailRows.length + (replaceDetails ? 0 : currentDetail.transactions.length);
+    const expectedCount = countText ? Number(countText) : null;
+    if (expectedCount !== null && expectedCount < totalRows) {
+      message.error('预期笔数不能少于已确认交易笔数');
+      return;
+    }
+    if (markDetailsComplete && (!replaceDetails || selectedDetailRows.length !== completionDraft.transactions.length ||
+        expectedCount !== selectedDetailRows.length || !completionDraft.source_manifest?.entries?.length ||
+        completionDraft.source_manifest.has_unsupported || completionDraft.source_manifest.entries.some(
+          entry => entry.truncated || entry.notes === 'file_adapter_required' || entry.notes === 'unsupported_type'))) {
+      message.error('完整明细须全量替换，并核对所有来源、交易和预期笔数');
+      return;
+    }
+    setCompletionLoading(true);
+    try {
+      await statementsApi.completeDetails(currentDetail.id, {
+        request_id: generateUUID(),
+        expected_version_id: currentDetail.current_version_id,
+        expected_detail_revision: currentDetail.detail_revision ?? 0,
+        draft_id: completionDraft.id,
+        expected_draft_revision: completionDraft.revision,
+        confirm_transaction_ids: selectedDetailRows,
+        replace_existing: replaceDetails,
+        details_complete: markDetailsComplete,
+        expected_transaction_count: expectedCount,
+      });
+      message.success('明细已保存为新的独立快照，账单金额与还款未改变');
+      setCompletionVisible(false);
+      await loadDetail(currentDetail.id);
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '明细保存失败，请刷新版本后重试');
+    } finally {
+      setCompletionLoading(false);
+    }
+  };
+
+  const showDetailHistory = async (setId: string, revision: number) => {
+    if (!currentDetail) return;
+    setHistoryLoading(true);
+    try {
+      const response = await statementsApi.getDetailSet(currentDetail.id, setId);
+      setHistoryRows(response.data?.transactions || []);
+      setHistoryTitle(`明细快照 #${revision}（只读）`);
+      setHistoryVisible(true);
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '历史明细加载失败');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
   const openCorrectModal = (record: StatementListItem | StatementDetailData) => {
     setCorrectTarget(record);
     correctForm.setFieldsValue({
@@ -530,6 +659,9 @@ export const Statements: React.FC = () => {
                   记录还款
                 </Button>
               )}
+              <Button size="small" onClick={openCompletion}>
+                后补明细
+              </Button>
               <Button size="small" onClick={() => openCorrectModal(currentDetail)}>
                 更正版本
               </Button>
@@ -602,6 +734,40 @@ export const Statements: React.FC = () => {
                 </Paragraph>
               </Card>
             )}
+
+            <Divider orientation="left">当前版本交易明细</Divider>
+            <Paragraph type="secondary">
+              覆盖状态：{currentDetail.detail_status === 'complete' ? (currentDetail.expected_transaction_count ? '已核对笔数并人工确认完整' : '历史完整标记（缺少笔数证明，请复核）') : currentDetail.detail_status === 'partial' ? '部分明细' : '无明细'}。
+              识别 {currentDetail.recognized_transaction_count ?? '未记录'} 笔，
+              确认 {currentDetail.confirmed_transaction_count ?? '未记录'} 笔，
+              异常 {currentDetail.flagged_transaction_count ?? '未记录'} 笔，
+              来源预期 {currentDetail.expected_transaction_count ?? '未知'} 笔。
+              交易明细仅供核对，不代表还款流水。
+            </Paragraph>
+            <Table size="small" rowKey="id" pagination={{ pageSize: 10 }}
+              dataSource={currentDetail.transactions || []}
+              columns={[
+                { title: '序号', dataIndex: 'sequence', width: 60 },
+                { title: '交易日', dataIndex: 'transaction_date', render: (v: string | null) => v || '-' },
+                { title: '描述', dataIndex: 'description', render: (v: string | null) => v || '-' },
+                { title: '尾号', dataIndex: 'card_tail', render: (v: string | null) => v || '-' },
+                { title: '金额', render: (_: unknown, tx: StatementDetailData['transactions'][number]) =>
+                  tx.amount_minor == null ? '-' : <CurrencyAmount cents={tx.amount_minor} currency={tx.currency || currentDetail.currency} /> },
+              ]}
+              locale={{ emptyText: '当前版本没有已确认交易明细' }} />
+
+            <Divider orientation="left">明细快照历史（只读）</Divider>
+            {(currentDetail.detail_history || []).length ? (
+              <Timeline items={(currentDetail.detail_history || []).map((snapshot) => ({
+                children: (
+                  <Space wrap>
+                    <Text>快照 #{snapshot.revision} · {snapshot.detail_status === 'complete' ? '完整' : snapshot.detail_status === 'partial' ? '部分' : '无明细'} · {new Date(snapshot.confirmed_at).toLocaleString()}</Text>
+                    <Text type="secondary">账单版本：{snapshot.statement_version_id.slice(0, 8)} · 来源草稿：{snapshot.source_draft_id?.slice(0, 8) || '无'}</Text>
+                    <Button size="small" loading={historyLoading} onClick={() => showDetailHistory(snapshot.id, snapshot.revision)}>查看明细</Button>
+                  </Space>
+                ),
+              }))} />
+            ) : <Text type="secondary">暂无独立明细快照；上方展示原账单版本内的明细。</Text>}
 
             <Divider orientation="left">还款记录列表</Divider>
             {currentDetail.payments && currentDetail.payments.length > 0 ? (
@@ -770,6 +936,92 @@ export const Statements: React.FC = () => {
             </Form.Item>
           </Form>
         )}
+      </Modal>
+
+      {/* 纯明细后补：草稿选择与逐笔人工核对 */}
+      <Modal
+        title="后补账单交易明细"
+        open={completionVisible}
+        width={880}
+        onCancel={() => setCompletionVisible(false)}
+        onOk={submitCompletion}
+        okText={replaceDetails ? '确认全量替换并保存快照' : '确认追加并保存快照'}
+        okButtonProps={{ disabled: !completionDraft || selectedDetailRows.length === 0 }}
+        confirmLoading={completionLoading}
+        destroyOnClose
+      >
+        {currentDetail && <>
+          <Paragraph type="secondary">仅更新交易明细快照，不修改账单应还金额、版本或还款记录。请与原始来源逐项核对；缺失字段不要猜测。</Paragraph>
+          <Paragraph>目标：{formatBankHolderTails(currentDetail.bank, currentDetail.holder, currentDetail.card_tails)} · {currentDetail.statement_date} · {currentDetail.currency} · 本期 <CurrencyAmount cents={currentDetail.amount_minor} currency={currentDetail.currency} />；当前已确认 {currentDetail.transactions.length} 笔，明细修订 #{currentDetail.detail_revision ?? 0}。</Paragraph>
+          <Form layout="vertical">
+            <Form.Item label="待审核明细草稿（仅列出同银行、账期、币种的候选；最终仍由后台验证归属）">
+              <Select
+                placeholder="选择草稿后核对汇总、卡片与来源"
+                value={completionDraft?.id}
+                loading={completionLoading}
+                onChange={selectCompletionDraft}
+                options={candidateDrafts.map(draft => ({ value: draft.id, label: `草稿 ${draft.id.slice(0, 8)} · ${draft.bank || '银行未知'} · ${draft.card_tails.join('、') || '尾号未知'} · ${draft.amount_minor == null ? '金额未知' : centsToYuanString(draft.amount_minor)} ${draft.currency || ''}` }))}
+              />
+            </Form.Item>
+            <Form.Item label="草稿不在候选列表时，输入其完整 ID 核对">
+              <Input.Search value={manualDraftId} onChange={e => setManualDraftId(e.target.value)}
+                enterButton="加载草稿" loading={completionLoading}
+                onSearch={() => { if (manualDraftId.trim()) selectCompletionDraft(manualDraftId.trim()); }}
+                placeholder="从草稿审核页复制草稿 ID" />
+            </Form.Item>
+          </Form>
+          {completionDraft && <>
+            <Paragraph>草稿：{completionDraft.bank || '银行未知'} · {completionDraft.statement_date} · 到期 {completionDraft.due_date || '未知'} · 卡尾号 {completionDraft.card_tails.join('、') || '未记录'} · 草稿修订 #{completionDraft.revision}</Paragraph>
+            <Paragraph type="secondary">来源范围：{completionDraft.source_manifest?.entries?.map(e => e.filename || e.kind).join('、') || '未记录'}；{completionDraft.source_manifest?.has_unsupported ? '含不支持来源，不能标记完整' : '请核对是否有遗漏或截断'}。</Paragraph>
+            <Table
+              size="small" rowKey="id" pagination={{ pageSize: 10 }}
+              dataSource={completionDraft.transactions || []}
+              rowSelection={{
+                selectedRowKeys: selectedDetailRows,
+                onChange: keys => { setSelectedDetailRows(keys.map(String)); setMarkDetailsComplete(false); },
+                getCheckboxProps: tx => ({ disabled: !!tx.review_flags?.length || tx.amount_minor == null || tx.amount_minor === 0 || tx.currency !== currentDetail.currency || (!!tx.card_tail && !currentDetail.card_tails?.includes(tx.card_tail)) }),
+              }}
+              columns={[
+                { title: '序号', dataIndex: 'sequence', width: 65 },
+                { title: '交易日', dataIndex: 'transaction_date', render: (v: string | null) => v || '待核对' },
+                { title: '描述', dataIndex: 'description', render: (v: string | null) => v || '待核对' },
+                { title: '尾号', dataIndex: 'card_tail', render: (v: string | null) => v || '-' },
+                { title: '金额', render: (_: unknown, tx: TransactionDetail) => tx.amount_minor == null ? '待核对' : <CurrencyAmount cents={tx.amount_minor} currency={tx.currency || currentDetail.currency} /> },
+                { title: '状态', render: (_: unknown, tx: TransactionDetail) => tx.review_flags?.length ? <Tag color="orange">{tx.review_flags.join('、')}</Tag> : <Tag color="green">可核对</Tag> },
+              ]}
+              locale={{ emptyText: '草稿无可核对交易明细' }}
+            />
+            <div style={{ marginTop: 16 }}>
+              <label>保存方式：{' '}
+                <Select style={{ width: 220 }} value={replaceDetails ? 'replace' : 'append'} onChange={value => { setReplaceDetails(value === 'replace'); setMarkDetailsComplete(false); }} options={[{ value: 'append', label: '追加（始终视为部分明细）' }, { value: 'replace', label: '全量替换当前明细' }]} />
+              </label>
+              {replaceDetails && <Paragraph type="warning" style={{ marginTop: 8 }}>全量替换会将本次勾选的交易作为当前全部明细；旧快照仍可在历史中查看。请确认原有 {currentDetail.transactions.length} 笔已在新来源中核对。</Paragraph>}
+            </div>
+            <div style={{ marginTop: 12 }}><label>原始来源可核对的本账期交易总笔数（未知请留空）：{' '}
+              <Input style={{ width: 120 }} value={expectedDetailCount} onChange={e => { setExpectedDetailCount(e.target.value); setMarkDetailsComplete(false); }} placeholder="来源笔数" />
+            </label></div>
+            <label style={{ display: 'block', marginTop: 12 }}>
+              <input type="checkbox" checked={markDetailsComplete}
+                disabled={!replaceDetails || !selectedDetailRows.length || selectedDetailRows.length !== completionDraft.transactions.length ||
+                  Number(expectedDetailCount) !== selectedDetailRows.length || !completionDraft.source_manifest?.entries?.length ||
+                  !!completionDraft.source_manifest?.has_unsupported || completionDraft.source_manifest?.entries?.some(e => e.truncated || e.notes === 'file_adapter_required' || e.notes === 'unsupported_type')}
+                onChange={e => setMarkDetailsComplete(e.target.checked)} />{' '}我已对照完整来源逐项核对，确认本账期明细无遗漏
+            </label>
+            <Paragraph type="secondary" style={{ marginTop: 8 }}>本次勾选 {selectedDetailRows.length} 笔；保存后预计 {selectedDetailRows.length + (replaceDetails ? 0 : currentDetail.transactions.length)} 笔。未标记完整时仅保存为部分明细。提交后如数据已变化，需刷新重新核对。</Paragraph>
+          </>}
+        </>}
+      </Modal>
+
+      <Modal title={historyTitle} open={historyVisible} width={800} footer={null} onCancel={() => setHistoryVisible(false)}>
+        <Table size="small" rowKey="id" pagination={{ pageSize: 10 }} dataSource={historyRows}
+          columns={[
+            { title: '序号', dataIndex: 'sequence', width: 65 },
+            { title: '交易日', dataIndex: 'transaction_date', render: (v: string | null) => v || '-' },
+            { title: '描述', dataIndex: 'description', render: (v: string | null) => v || '-' },
+            { title: '尾号', dataIndex: 'card_tail', render: (v: string | null) => v || '-' },
+            { title: '金额', render: (_: unknown, tx: TransactionDetail) => tx.amount_minor == null ? '-' : <CurrencyAmount cents={tx.amount_minor} currency={tx.currency || currentDetail?.currency || 'CNY'} /> },
+          ]}
+          locale={{ emptyText: '该快照没有交易明细' }} />
       </Modal>
 
       {/* 版本更正弹窗 */}

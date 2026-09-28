@@ -23,8 +23,19 @@ class AccountEdit(Strict):
     alias: str | None = Field(None, max_length=100)
     holder: str | None = Field(None, max_length=50)
     reference: str | None = Field(None, max_length=100)
+    billing_mode: Literal["per_card", "consolidated"] | None = None
     status: Literal["active", "archived"] = "active"
 
+class HistoricalOwnershipDecision(Strict):
+    statement_id: uuid.UUID
+    expected_current_version_id: uuid.UUID | None
+    target_account_id: uuid.UUID
+    target_account_revision: int = Field(ge=1)
+    target_card_id: uuid.UUID | None = None
+
+class HistoricalOwnershipPreflight(Strict):
+    expected_account_revision: int = Field(ge=1)
+    decisions: list[HistoricalOwnershipDecision] = Field(max_length=1000)
 class CardEdit(Strict):
     expected_revision: int = Field(ge=1)
     display_name: str | None = Field(None, max_length=100)
@@ -99,6 +110,17 @@ class StatementCorrection(Strict):
     amount_minor: int = Field(ge=0, le=999999999999, strict=True)
     minimum_minor: int | None = Field(None, ge=0, le=999999999999, strict=True)
     reason: str = Field(min_length=3, max_length=200)
+
+class DetailCompletion(Strict):
+    request_id: uuid.UUID
+    expected_version_id: uuid.UUID
+    expected_detail_revision: int = Field(ge=0)
+    draft_id: uuid.UUID
+    expected_draft_revision: int = Field(ge=1)
+    confirm_transaction_ids: list[uuid.UUID] = Field(min_length=1, max_length=10000)
+    replace_existing: bool = False
+    details_complete: bool = False
+    expected_transaction_count: int | None = Field(None, ge=1, le=10000, strict=True)
 
 class SourceAction(Strict):
     action: Literal["ignore", "restore"]

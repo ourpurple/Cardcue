@@ -25,8 +25,8 @@ import {
   SplitCellsOutlined,
 } from '@ant-design/icons';
 import { accountsApi } from '../api';
-import { BankAccount, AccountCard } from '../types';
-import { getBankShort, isMultiAccountBank, isSingleAccountBank, formatBankHolderTails, getCustomDisplayName, cleanAccountAlias } from '../utils/bankDisplay';
+import { BankAccount, AccountCard, HistoricalOwnershipPreview, HistoricalOwnershipPreflightResult } from '../types';
+import { getBankShort, formatBankHolderTails, getCustomDisplayName, cleanAccountAlias } from '../utils/bankDisplay';
 
 const { Text } = Typography;
 
@@ -63,6 +63,56 @@ export const Accounts: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [accounts, setAccounts] = useState<BankAccount[]>([]);
 
+  const [historyPreview, setHistoryPreview] = useState<HistoricalOwnershipPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [ownershipMapping, setOwnershipMapping] = useState<Record<string, { accountId?: string; cardId?: string }>>({});
+  const [preflightResult, setPreflightResult] = useState<HistoricalOwnershipPreflightResult | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+
+  const runHistoryPreflight = async () => {
+    if (!historyPreview) return;
+    if (historyPreview.statements.some(stmt => !accounts.some(a => a.id === ownershipMapping[stmt.id]?.accountId))) {
+      message.warning('请为每份账单选择有效目标账户；保留原归属也需要选择');
+      return;
+    }
+    setPreflightLoading(true);
+    try {
+      const response = await accountsApi.preflightHistory(historyPreview.account.id, {
+        expected_account_revision: historyPreview.account.revision,
+        decisions: historyPreview.statements.map(stmt => {
+          const choice = ownershipMapping[stmt.id];
+          const target = accounts.find(a => a.id === choice.accountId)!;
+          return {
+            statement_id: stmt.id,
+            expected_current_version_id: stmt.current_version_id,
+            target_account_id: target.id,
+            target_account_revision: target.revision,
+            target_card_id: choice.cardId || null,
+          };
+        }),
+      });
+      setPreflightResult(response.data);
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '映射预检失败，请刷新预览');
+      setPreflightResult(null);
+    } finally {
+      setPreflightLoading(false);
+    }
+  };
+
+  const openHistoryPreview = async (accountId: string) => {
+    setOwnershipMapping({});
+    setPreflightResult(null);
+    setPreviewLoading(true);
+    try {
+      const response = await accountsApi.previewHistory(accountId);
+      setHistoryPreview(response.data);
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '读取历史归属预览失败');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
   // Account Modal
   const [accountModalOpen, setAccountModalOpen] = useState<boolean>(false);
   const [editingAccount, setEditingAccount] = useState<BankAccount | null>(null);
@@ -98,106 +148,27 @@ export const Accounts: React.FC = () => {
     fetchAccounts();
   }, []);
 
-  // ---- Build display rows ----
-  const displayRows = useMemo<DisplayRow[]>(() => {
-    // Group accounts by (bankShort, holder)
-    const groups = new Map<string, BankAccount[]>();
-    for (const acct of accounts) {
-      const bank = acct.bank || acct.bank_name || '';
-      const holder = (acct.holder || '').trim();
-      const bankShort = getBankShort(bank);
-      const key = `${bankShort}||${holder}`;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(acct);
-    }
-
-    const rows: DisplayRow[] = [];
-    for (const [, group] of groups) {
-      const bank = group[0].bank || group[0].bank_name || '';
-      const holder = group[0].holder || '';
-      const bankShort = getBankShort(bank);
-
-      // Decide merge strategy based on bank type:
-      // - Multi-account banks: always show each account separately
-      // - Single-account banks: always merge into one row
-      // - Unknown banks: merge if only 1 account, separate if >1
-      const shouldMerge = isSingleAccountBank(bankShort)
-        ? true
-        : isMultiAccountBank(bankShort)
-          ? false
-          : group.length === 1;
-
-      if (shouldMerge) {
-        // Merge all accounts for this bank+holder into one row
-        const allCards: AccountCard[] = [];
-        for (const acct of group) {
-          for (const card of (acct.cards || [])) {
-            allCards.push(card);
-          }
-        }
-        const tailParts = allCards.map(c => c.tail || c.card_last4 || '').filter(Boolean);
-        const title = formatBankHolderTails(bankShort, holder, tailParts);
-
-        rows.push({
-          key: group.map(a => a.id).join('__'),
-          bankShort,
-          bankFull: bank,
-          holder,
-          merged: group.length > 1,
-          accounts: group,
-          allCards,
-          displayTitle: title || group[0].alias || bank,
-          status: group[0].status,
-          created_at: group.reduce((earliest, a) =>
-            a.created_at < earliest ? a.created_at : earliest, group[0].created_at),
-        });
-      } else {
-        // Multi-account bank: show each card as its own row.
-        // If an account has multiple cards, each card becomes a separate row
-        // so the user sees e.g. "广发 牛鋆辉 2090" and "广发 牛鋆辉 9759".
-        for (const acct of group) {
-          const cards = acct.cards || [];
-          if (cards.length <= 1) {
-            // 0 or 1 card — one row for this account
-            const tail = cards.length === 1 ? (cards[0].tail || cards[0].card_last4 || '') : '';
-            const title = formatBankHolderTails(bankShort, holder, tail);
-            rows.push({
-              key: acct.id,
-              bankShort,
-              bankFull: acct.bank || bank,
-              holder,
-              merged: false,
-              accounts: [acct],
-              allCards: cards,
-              displayTitle: title || acct.alias || bank,
-              status: acct.status,
-              created_at: acct.created_at,
-            });
-          } else {
-            // Multiple cards — one row per card
-            for (const card of cards) {
-              const tail = card.tail || card.card_last4 || '';
-              const title = formatBankHolderTails(bankShort, holder, tail);
-              rows.push({
-                key: `${acct.id}__${card.id}`,
-                bankShort,
-                bankFull: acct.bank || bank,
-                holder,
-                merged: false,
-                accounts: [acct],
-                allCards: [card],
-                displayTitle: title || acct.alias || bank,
-                status: acct.status,
-                created_at: acct.created_at,
-              });
-            }
-          }
-        }
-      }
-    }
-
-    return rows;
-  }, [accounts]);
+  // One row represents exactly one repayment account. Same bank and holder
+  // do not prove that two historical accounts can be merged safely.
+  const displayRows = useMemo<DisplayRow[]>(() => accounts.map((acct) => {
+    const bank = acct.bank || acct.bank_name || '';
+    const bankShort = getBankShort(bank);
+    const holder = acct.holder || '';
+    const cards = acct.cards || [];
+    const tails = cards.map(c => c.tail || c.card_last4 || '').filter(Boolean);
+    return {
+      key: acct.id,
+      bankShort,
+      bankFull: bank,
+      holder,
+      merged: false,
+      accounts: [acct],
+      allCards: cards,
+      displayTitle: formatBankHolderTails(bankShort, holder, tails) || acct.alias || bank,
+      status: acct.status,
+      created_at: acct.created_at,
+    };
+  }), [accounts]);
 
   // Account Form Handlers
   const openCreateAccount = () => {
@@ -546,6 +517,10 @@ export const Accounts: React.FC = () => {
             </Text>
             <Space size={8}>
               <Tag color="blue">{row.bankShort}</Tag>
+              <Tag color={acct.billing_mode === 'per_card' ? 'purple' : acct.billing_mode === 'consolidated' ? 'green' : 'orange'}>
+                {acct.billing_mode === 'per_card' ? '独立还款' : acct.billing_mode === 'consolidated' ? '合并还款' : '归属待确认'}
+              </Tag>
+              {acct.billing_mode === 'per_card' && row.allCards.length > 1 && <Tag color="red">多卡历史异常，需核对</Tag>}
               {row.merged ? (
                 <Tag color="orange" style={{ fontSize: 11 }}>
                   {row.accounts.length} 个账户合并
@@ -600,7 +575,9 @@ export const Accounts: React.FC = () => {
         const r = row.accounts[0];
         return (
           <Space>
-            <Button size="small" icon={<EditOutlined />} onClick={() => openEditAccount(r)}>
+            <Button size="small" loading={previewLoading} onClick={() => openHistoryPreview(r.id)}>
+              历史归属预览
+            </Button>            <Button size="small" icon={<EditOutlined />} onClick={() => openEditAccount(r)}>
               编辑
             </Button>
             <Button size="small" icon={<PlusOutlined />} onClick={() => openAddCard(r.id)}>
@@ -677,6 +654,69 @@ export const Accounts: React.FC = () => {
         />
       </Card>
 
+      <Modal
+        title="历史归属预览（只读）"
+        open={historyPreview !== null}
+        onCancel={() => setHistoryPreview(null)}
+        footer={<Space><Button onClick={() => setHistoryPreview(null)}>关闭</Button><Button type="primary" loading={preflightLoading} onClick={runHistoryPreflight} disabled={!historyPreview?.statements.length}>检验映射（不执行）</Button></Space>}
+        width={800}
+      >
+        {historyPreview && <Space direction="vertical" style={{ width: '100%' }}>
+          <Text strong>{historyPreview.account.bank} · {historyPreview.account.alias || historyPreview.account.holder || '未命名账户'}</Text>
+          <Text>账户 ID：{historyPreview.account.id}；修订号：{historyPreview.account.revision}</Text>
+          <Text>现行模式：{historyPreview.account.billing_mode === 'per_card' ? '独立还款' : historyPreview.account.billing_mode === 'consolidated' ? '合并还款' : '待确认'}；银行默认仅供参考：{historyPreview.account.bank_default_mode_hint === 'per_card' ? '独立还款' : historyPreview.account.bank_default_mode_hint === 'consolidated' ? '合并还款' : '未知'}</Text>
+          <Text>卡片 {historyPreview.counts.cards} · 账单 {historyPreview.counts.statements} · 版本 {historyPreview.counts.versions} · 还款记录 {historyPreview.counts.payments} · 已确认明细 {historyPreview.counts.confirmed_transactions} · 关联草稿 {historyPreview.counts.linked_drafts}</Text>
+          {historyPreview.cards.map(card => <Text key={card.id}>卡片 {card.tail}（{card.status}）· ID {card.id} · 修订 {card.revision}</Text>)}
+          {historyPreview.peer_account_ids.length > 0 && <Text type="warning">同银行同持卡人的其他底层账户：{historyPreview.peer_account_ids.join('、')}（不自动合并）</Text>}
+          {historyPreview.risks.map((risk, index) => <Text type="warning" key={index}>⚠ {risk}</Text>)}
+          <Table
+            size="small"
+            rowKey="id"
+            pagination={{ pageSize: 10 }}
+            dataSource={historyPreview.statements}
+            columns={[
+              { title: '原账单 / 日期', render: (_: unknown, s: HistoricalOwnershipPreview['statements'][number]) => <Space direction="vertical"><Text>{s.statement_date} · {s.currency}</Text><Text copyable>{s.id}</Text></Space> },
+              { title: '现归属账户', dataIndex: 'account_id', render: (id: string) => <Text copyable>{id}</Text> },
+              { title: '关联记录', render: (_: unknown, s: HistoricalOwnershipPreview['statements'][number]) => `版本 ${s.version_count} / 还款 ${s.payment_count}（有效 ${s.active_payment_count}）/ 明细 ${s.confirmed_transaction_count}` },
+              { title: '卡尾线索', render: (_: unknown, s: HistoricalOwnershipPreview['statements'][number]) => s.observed_card_tails.join('、') || '无' },
+              { title: '拟调整归属', render: (_: unknown, s: HistoricalOwnershipPreview['statements'][number]) => <Space direction="vertical">
+                <Select
+                  placeholder="选择目标账户（可选原账户）"
+                  style={{ width: 230 }}
+                  value={ownershipMapping[s.id]?.accountId}
+                  options={accounts.map(a => ({ value: a.id, disabled: a.status !== 'active', label: `${a.bank} · ${a.alias || a.holder || '未命名'} · ${a.id.slice(0, 8)}` }))}
+                  onChange={accountId => {
+                    setOwnershipMapping(current => ({ ...current, [s.id]: { accountId } }));
+                    setPreflightResult(null);
+                  }}
+                />
+                {(() => {
+                  const target = accounts.find(a => a.id === ownershipMapping[s.id]?.accountId);
+                  return target?.billing_mode === 'per_card' ? <Select
+                    placeholder="明确指定卡片 ID"
+                    style={{ width: 230 }}
+                    value={ownershipMapping[s.id]?.cardId}
+                    options={(target.cards || []).filter(card => card.status === 'active').map(card => ({ value: card.id, label: `尾号 ${card.tail || card.card_last4} · ${card.id.slice(0, 8)}` }))}
+                    onChange={cardId => {
+                      setOwnershipMapping(current => ({ ...current, [s.id]: { accountId: target.id, cardId } }));
+                      setPreflightResult(null);
+                    }}
+                  /> : null;
+                })()}
+                {s.risks.map((risk, index) => <Text type="warning" key={index}>{risk}</Text>)}
+              </Space> },
+            ]}
+          />
+          {preflightResult && <Space direction="vertical">
+            <Text type={preflightResult.valid_mapping ? 'success' : 'danger'}>
+              {preflightResult.valid_mapping ? '映射预检通过（不是迁移批准）' : '映射存在冲突，不能执行'}
+            </Text>
+            {preflightResult.issues.map((issue, index) => <Text type="danger" key={index}>{issue}</Text>)}
+            <Text type="secondary">{preflightResult.notice}</Text>
+          </Space>}
+          <Text type="secondary">{historyPreview.next_step}。此页面不会拆分、合并或修改账单。</Text>
+        </Space>}
+      </Modal>
       {/* Account Modal (Create / Edit) */}
       <Modal
         title={editingAccount ? '编辑银行账户' : '新建银行账户'}

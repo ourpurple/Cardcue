@@ -8,11 +8,10 @@ from cardcue_api.admin.outbound import post_json
 from cardcue_api.admin.security import now
 from cardcue_api.contracts import StatementDraft
 from cardcue_api.mail.crypto import decrypt_token
-from cardcue_api.parsing.model_adapter import SYSTEM_PROMPT, parse_model_response, parse_model_response_multi
-from cardcue_api.parsing.html_extractor import HtmlStatementExtractor
+from cardcue_api.parsing.model_adapter import SYSTEM_PROMPT_V2, parse_model_response_multi
 from cardcue_api.persistence.database import async_session_factory
 
-PROMPT_VERSION = "web-2-multi-card"
+PROMPT_VERSION = "v2-direct-transactions-2"
 
 class ManagedExtractor:
     def __init__(self, revision: ModelRevision | None, force=False):
@@ -26,7 +25,7 @@ class ManagedExtractor:
         drafts, extractor_name = await self.extract_multi(text, subject=subject, sender=sender, email_date=email_date)
         return drafts[0], extractor_name
 
-    async def extract_multi(self, text: str, subject="", sender="", email_date=None):
+    async def extract_multi(self, text: str, subject="", sender="", email_date=None, source_manifest=None):
         """Extract one or more drafts. Returns (list[StatementDraft], extractor_name)."""
         if self.revision is None:
             try:
@@ -44,14 +43,15 @@ class ManagedExtractor:
             except Exception:
                 pass
         if self.revision is None:
-            drafts = HtmlStatementExtractor().extract_multi(text, is_html=False, subject=subject, sender=sender, email_date=email_date)
-            for d in drafts:
-                d.review_reasons = list(dict.fromkeys([*d.review_reasons, "rule_only:no_active_model"]))
-            return drafts, "rule"
+            raise ValueError("model_not_configured")
+        if source_manifest is not None and source_manifest.has_unsupported:
+            raise ValueError("attachment_capability_unavailable")
         params = self.revision.parameters
         if len(text) > params["input_limit"]:
             raise ValueError("input_exceeds_limit_manual_review_required")
-        fingerprint = hashlib.sha256(json.dumps([str(self.revision.id), PROMPT_VERSION, text, subject, sender, str(email_date)], ensure_ascii=False).encode()).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps([str(self.revision.id), PROMPT_VERSION, text, subject, sender,
+            str(email_date), source_manifest.model_dump() if source_manifest else None],
+            ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         self.fingerprint = fingerprint
         cache_key = "cache:" + fingerprint[:40]
         async with async_session_factory() as session:
@@ -66,10 +66,11 @@ class ManagedExtractor:
         url = params["base_url"].rstrip("/")
         if not url.endswith("/chat/completions"):
             url += "/chat/completions"
-        prompt = SYSTEM_PROMPT.replace('infer the year from Email Date.', 'leave the date null; never infer a missing year.')
+        prompt = SYSTEM_PROMPT_V2
         payload = {"model": params["model"], "messages": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps({"untrusted_email": {"subject": subject, "sender": sender, "body": text}}, ensure_ascii=False)}],
+            {"role": "user", "content": json.dumps({"untrusted_email": {"subject": subject, "sender": sender, "body": text, "email_date": str(email_date) if email_date else None,
+                "source_manifest": source_manifest.model_dump() if source_manifest else None}}, ensure_ascii=False)}],
             "temperature": params["temperature"], "max_tokens": params["max_tokens"]}
         if params["json_mode"]:
             payload["response_format"] = {"type": "json_object"}
@@ -93,12 +94,19 @@ class ManagedExtractor:
                     raise ValueError("incomplete_model_response")
                 raw = choice["message"]["content"]
                 results = parse_model_response_multi(raw, email_date=None)
-                # Evidence must be an actual excerpt of the submitted data, not invented prose.
+                # Preserve invalid evidence as a review reason, never certify it as verified.
                 corpus = text + "\n" + subject + "\n" + sender
                 for result in results:
+                    bad_fields = {e.field for e in result.evidence if e.excerpt not in corpus}
                     result.evidence = [e for e in result.evidence if e.excerpt in corpus]
-                    result = StatementDraft.model_validate_json(result.model_dump_json())
-                # Re-validate all drafts
+                    if bad_fields:
+                        result.review_reasons = list(dict.fromkeys([
+                            *result.review_reasons, *[f"unverified_evidence:{field}" for field in sorted(bad_fields)]]))
+                    for tx in result.transactions:
+                        if not tx.evidence or any(e.excerpt not in corpus for e in tx.evidence):
+                            tx.review_flags = list(dict.fromkeys([*tx.review_flags, "unverified_evidence"]))
+                        tx.evidence = [e for e in tx.evidence if e.excerpt in corpus]
+                    result.source_manifest = source_manifest
                 results = [StatementDraft.model_validate_json(r.model_dump_json()) for r in results]
                 usage = data.get("usage") or {}
                 self.usage = {k: v for k, v in usage.items() if k in ("prompt_tokens", "completion_tokens", "total_tokens") and type(v) is int and v >= 0}

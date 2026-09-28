@@ -15,6 +15,8 @@ class AccountCreate(BaseModel):
     alias: str | None = Field(default=None, max_length=100)
     holder: str | None = Field(default=None, max_length=50)
     reference: str | None = Field(default=None, max_length=100)
+    billing_mode: Literal["per_card", "consolidated"] | None = None
+    billing_mode_source: Literal["bank_default", "manual_override"] | None = None
 
 
 class AccountUpdate(BaseModel):
@@ -31,6 +33,8 @@ class AccountOut(BaseModel):
     alias: str | None
     holder: str | None
     reference: str | None
+    billing_mode: Literal["per_card", "consolidated"] | None = None
+    billing_mode_source: Literal["bank_default", "manual_override"] | None = None
     status: str
     created_at: datetime
     updated_at: datetime
@@ -77,6 +81,11 @@ class StatementVersionOut(BaseModel):
     amount_minor: int
     minimum_minor: int | None
     source: str
+    detail_status: str = "none"
+    expected_transaction_count: int | None = None
+    recognized_transaction_count: int = 0
+    confirmed_transaction_count: int = 0
+    flagged_transaction_count: int = 0
     reason: str | None
     confirmed_at: datetime | None
     confirmed_by: str | None
@@ -297,6 +306,10 @@ class StatementDraftConfirmRequest(BaseModel):
     request_id: uuid.UUID | None = None
     expected_revision: int | None = Field(default=None, ge=1)
     expected_statement_version_id: uuid.UUID | None = None
+    confirm_transaction_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10000)
+    details_complete: bool = False
+    # Number transcribed from the full source by the reviewer; never inferred from model rows.
+    expected_transaction_count: int | None = Field(default=None, ge=1, le=10000, strict=True)
     model_config = ConfigDict(extra="forbid")
     account_id: uuid.UUID
     card_id: uuid.UUID | None = None

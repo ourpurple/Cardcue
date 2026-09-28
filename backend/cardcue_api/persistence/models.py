@@ -42,6 +42,14 @@ class Account(Base):
     alias: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="User-chosen display name")
     reference: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="Account reference from bank email")
     holder: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="Card holder name")
+    billing_mode: Mapped[str | None] = mapped_column(
+        String(20), nullable=True,
+        comment="per_card / consolidated / None=unknown; see domain.bank_rules",
+    )
+    billing_mode_source: Mapped[str | None] = mapped_column(
+        String(20), nullable=True,
+        comment="bank_default / manual_override; None when billing_mode is None",
+    )
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -112,6 +120,11 @@ class StatementVersion(Base):
     amount_minor: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="Total bill in minor units")
     minimum_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="Minimum payment in minor units")
     source: Mapped[str] = mapped_column(String(50), nullable=False, default="manual", comment="manual / email / model")
+    detail_status: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
+    expected_transaction_count: Mapped[int | None] = mapped_column(nullable=True)
+    recognized_transaction_count: Mapped[int | None] = mapped_column(nullable=True)
+    confirmed_transaction_count: Mapped[int | None] = mapped_column(nullable=True)
+    flagged_transaction_count: Mapped[int | None] = mapped_column(nullable=True)
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True, comment="Why this version was created")
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_by: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="device id or 'system'")

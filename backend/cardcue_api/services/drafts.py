@@ -1,6 +1,5 @@
 """Draft service: parsing email sources into drafts, manual review, and atomic confirmation."""
 
-import os
 import hashlib
 import uuid
 from datetime import date, datetime, timezone
@@ -18,9 +17,7 @@ from cardcue_api.domain.schemas import (
 )
 from cardcue_api.mail.parser import MailMimeParser
 from cardcue_api.mail.storage import MailStorageManager
-from cardcue_api.parsing.html_extractor import HtmlStatementExtractor
-from cardcue_api.parsing.model_adapter import ModelStatementExtractor
-from cardcue_api.parsing.pdf_extractor import PdfStatementExtractor
+from cardcue_api.parsing.model_input import assemble_model_input
 from cardcue_api.persistence import (
     Account,
     Card,
@@ -29,9 +26,32 @@ from cardcue_api.persistence import (
     EmailSource,
     Statement,
     StatementDraftModel,
+    DraftTransaction,
+    ConfirmedTransaction,
     StatementVersion,
 )
 from cardcue_api.services.billing import ConflictError, NotFoundError
+
+
+def detail_coverage_status(*, recognized: int, confirmed: int, flagged: int,
+                           expected: int | None, complete: bool,
+                           manifest: dict | None) -> str:
+    """Do not equate selected model rows with completeness of the original source."""
+    if confirmed > recognized or flagged > recognized:
+        raise ConflictError("Invalid detail coverage counts")
+    if complete:
+        if not recognized or confirmed != recognized:
+            raise ConflictError("Cannot mark details complete while transactions remain unconfirmed")
+        if expected is None or expected != recognized:
+            raise ConflictError("Full-source expected transaction count must match recognized rows")
+        sources = (manifest or {}).get("entries") or []
+        if flagged or not sources or (manifest or {}).get("has_unsupported") or any(
+            entry.get("truncated") or entry.get("notes") in ("unsupported_type", "file_adapter_required")
+            for entry in sources
+        ):
+            raise ConflictError("Unresolved rows or source coverage prevent complete details")
+        return "complete"
+    return "partial" if recognized or expected else "none"
 
 
 class DraftService:
@@ -39,8 +59,6 @@ class DraftService:
 
     def __init__(self, storage_manager: MailStorageManager | None = None) -> None:
         self.storage_manager = storage_manager or MailStorageManager()
-        self.html_extractor = HtmlStatementExtractor()
-        self.pdf_extractor = PdfStatementExtractor()
         from cardcue_api.admin.model_runtime import ManagedExtractor
         self.model_extractor = ManagedExtractor(None)
         self.mime_parser = MailMimeParser()
@@ -107,6 +125,8 @@ class DraftService:
             card_tails=draft_data.card_tails,
             evidence=[{"field": e.field, "excerpt": e.excerpt} for e in draft_data.evidence],
             review_reasons=draft_data.review_reasons,
+            source_manifest=draft_data.source_manifest.model_dump() if draft_data.source_manifest else None,
+            detail_status="partial" if draft_data.transactions else "none",
             extractor_name=extractor_name,
             model_fingerprint=fingerprint,
         )
@@ -146,104 +166,54 @@ class DraftService:
         if not source:
             raise NotFoundError(f"EmailSource {source_id} not found")
 
-        # 1. Check for PDF attachments first
-        pdf_text = ""
-        has_encrypted_pdf = False
-        pdf_attachments = [att for att in source.attachments if att.filename.lower().endswith(".pdf")]
-        if pdf_attachments:
-            for att in pdf_attachments:
-                if os.path.exists(att.storage_path):
-                    txt = self.pdf_extractor.get_text_from_path(att.storage_path)
-                    if txt and txt.strip():
-                        pdf_text = txt
-                        break
-                    else:
-                        check_draft = self.pdf_extractor.extract_from_path(att.storage_path)
-                        if "attachment_password_required" in check_draft.review_reasons:
-                            has_encrypted_pdf = True
+        # Never create duplicate drafts for one source on retry/reparse. A
+        # confirmed source requires an explicit reviewed correction workflow.
+        existing_drafts = list((await session.execute(
+            select(StatementDraftModel).where(StatementDraftModel.email_source_id == source_id)
+            .order_by(StatementDraftModel.created_at)
+        )).scalars().all())
+        if existing_drafts:
+            if any(d.status == "confirmed" for d in existing_drafts):
+                raise ConflictError("Source already confirmed; review the existing statement")
+            return existing_drafts
 
-        # 2. Extract HTML or plain text from email body
-        email_body_text = ""
-        if source.raw_storage_path and os.path.exists(source.raw_storage_path):
-            try:
-                raw_bytes = self.storage_manager.read_file(source.raw_storage_path)
-                parsed_email = self.mime_parser.parse_bytes(raw_bytes)
-                if parsed_email.body_html:
-                    email_body_text = self.html_extractor.html_to_text(parsed_email.body_html)
-                elif parsed_email.body_text:
-                    email_body_text = parsed_email.body_text
-            except Exception:
-                pass
-
-        # 3. Determine the best text to parse
-        parse_text = pdf_text or email_body_text
+        # V2: preserve body structure and inventory every attachment. No local
+        # business-field extraction, PDF text extraction or regular-expression fallback.
+        model_input = assemble_model_input(source, self.storage_manager, self.mime_parser)
+        if model_input.manifest.has_unsupported:
+            raise ValueError("attachment_capability_unavailable")
         email_date_value = source.email_date.date() if hasattr(source.email_date, "date") else source.email_date
-
-        if not parse_text:
-            # No text to parse
-            draft_data_list = [self.html_extractor.extract(
-                content="",
-                is_html=False,
-                subject=source.subject,
-                sender=source.sender,
-                email_date=email_date_value,
-            )]
-            extractor_name = "rule"
-            for d in draft_data_list:
-                reasons = list(d.review_reasons)
-                reasons.append("no_content_extracted")
-                if has_encrypted_pdf:
-                    reasons.append("attachment_password_required")
-                d.review_reasons = list(dict.fromkeys(reasons))
-        else:
-            # 4. Try model extraction first, then rule-based
-            try:
-                draft_data_list, extractor_name = await self.model_extractor.extract_multi(
-                    text=parse_text,
-                    subject=source.subject,
-                    sender=source.sender,
-                    email_date=email_date_value,
-                )
-            except Exception:
-                # Fallback: rule-based multi-card extraction
-                draft_data_list = self.html_extractor.extract_multi(
-                    content=parse_text,
-                    is_html=False,
-                    subject=source.subject,
-                    sender=source.sender,
-                    email_date=email_date_value,
-                )
-                extractor_name = "rule:fallback"
-
-        # 5. Create draft model(s) and attempt auto-matching
+        draft_data_list, extractor_name = await self.model_extractor.extract_multi(
+            text=model_input.body,
+            subject=source.subject,
+            sender=source.sender,
+            email_date=email_date_value,
+            source_manifest=model_input.manifest,
+        )
+        if not draft_data_list:
+            raise ValueError("no_statement_detected")
         fingerprint = getattr(self.model_extractor, "fingerprint", None)
         result_drafts: list[StatementDraftModel] = []
-
         for draft_data in draft_data_list:
+            draft_data.source_manifest = model_input.manifest
             draft_model = self._create_draft_model(
-                draft_data=draft_data,
-                source=source,
-                extractor_name=extractor_name,
+                draft_data=draft_data, source=source, extractor_name=extractor_name,
                 fingerprint=fingerprint,
             )
-
-            # Auto-match account/card if possible
-            if draft_data.bank and draft_data.card_tails:
-                for tail in draft_data.card_tails:
-                    card_match = (await session.execute(
-                        select(Card).join(Account).where(
-                            Account.bank == draft_data.bank,
-                            Card.tail == tail,
-                            Account.status == "active",
-                            Card.status == "active",
-                        )
-                    )).scalar_one_or_none()
-                    if card_match:
-                        draft_model.matched_account_id = card_match.account_id
-                        draft_model.matched_card_id = card_match.id
-                        break
-
+            # A four-digit tail is not an identity. Matching is a manual review
+            # decision until account, bank, holder and billing mode are validated.
             session.add(draft_model)
+            await session.flush()
+            for tx in draft_data.transactions:
+                session.add(DraftTransaction(
+                    draft_id=draft_model.id, sequence=tx.sequence,
+                    transaction_date=tx.transaction_date, posting_date=tx.posting_date,
+                    description=tx.description, amount_minor=tx.amount_minor,
+                    currency=tx.currency, card_tail=tx.card_tail,
+                    transaction_type=tx.transaction_type,
+                    evidence=[e.model_dump() for e in tx.evidence],
+                    review_flags=tx.review_flags,
+                ))
             result_drafts.append(draft_model)
 
         # Update source status
@@ -271,6 +241,11 @@ class DraftService:
         if not draft:
             raise NotFoundError(f"Statement draft {draft_id} not found")
 
+        if req.request_id:
+            receipt = await session.get(CommandReceipt, req.request_id)
+            if receipt:
+                # Callers receive a conflict rather than a different return shape.
+                raise ConflictError("Request already processed; reload the draft")
         if draft.status != "pending_review":
             raise ConflictError(f"Draft is already {draft.status}; cannot confirm")
 
@@ -288,11 +263,61 @@ class DraftService:
         if not currency or amount_minor is None or not statement_date or not due_date:
             raise ConflictError("Cannot confirm: required fields missing")
 
+        if due_date < statement_date:
+            raise ConflictError("Due date must not precede statement date")
+        account = (await session.execute(select(Account).where(Account.id == account_id).with_for_update())).scalar_one_or_none()
+        if not account or account.status != "active":
+            raise ConflictError("Active repayment account required")
+        if account.billing_mode is None:
+            raise ConflictError("Repayment mode requires manual confirmation")
+        from cardcue_api.domain.bank_rules import normalise_bank_name
+        if draft.bank and normalise_bank_name(draft.bank) != normalise_bank_name(account.bank):
+            raise ConflictError("Draft bank conflicts with repayment account")
+        active_cards = list((await session.execute(select(Card).where(
+            Card.account_id == account_id, Card.status == "active"
+        ))).scalars().all())
+        if account.billing_mode == "per_card" and len(active_cards) != 1:
+            raise ConflictError("Per-card account must have exactly one active card")
+        if card_id is not None and card_id not in {card.id for card in active_cards}:
+            raise ConflictError("Selected card does not belong to active account")
+        if account.billing_mode == "per_card":
+            if len(set(draft.card_tails or [])) > 1:
+                raise ConflictError("Multi-card draft has no separate per-card total; review manually")
+            if card_id is not None and card_id != active_cards[0].id:
+                raise ConflictError("Per-card account and card do not match")
+            card_id = active_cards[0].id
+            if draft.card_tails and active_cards[0].tail not in draft.card_tails:
+                raise ConflictError("Draft card tail conflicts with selected account")
+        if len(set(req.confirm_transaction_ids)) != len(req.confirm_transaction_ids):
+            raise ConflictError("Duplicate transaction selection")
+        draft_tx = list((await session.execute(select(DraftTransaction).where(
+            DraftTransaction.draft_id == draft.id).order_by(DraftTransaction.sequence)
+        )).scalars().all())
+        selected_ids = set(req.confirm_transaction_ids)
+        if not selected_ids.issubset({tx.id for tx in draft_tx}):
+            raise ConflictError("Transaction does not belong to this draft")
+        selected_tx = [tx for tx in draft_tx if tx.id in selected_ids]
+        for tx in selected_tx:
+            if tx.amount_minor is None or tx.amount_minor == 0 or tx.currency != currency:
+                raise ConflictError("Selected transaction has invalid amount or currency")
+            if tx.review_flags:
+                raise ConflictError("Selected transaction has unresolved review flags")
+            if tx.card_tail and tx.card_tail not in {card.tail for card in active_cards}:
+                raise ConflictError("Transaction card tail is not part of selected account")
+        flagged_count = sum(bool(tx.review_flags) for tx in draft_tx)
+        manifest = draft.source_manifest or {}
+        detail_status = detail_coverage_status(
+            recognized=len(draft_tx), confirmed=len(selected_tx), flagged=flagged_count,
+            expected=req.expected_transaction_count, complete=req.details_complete,
+            manifest=draft.source_manifest,
+        )
+        coverage = dict(expected_transaction_count=req.expected_transaction_count,
+                        recognized_transaction_count=len(draft_tx),
+                        confirmed_transaction_count=len(selected_tx),
+                        flagged_transaction_count=flagged_count)
+
         receipt_id = req.request_id or uuid.uuid4()
         fingerprint = hashlib.sha256(f"confirm:{draft_id}:{receipt_id}".encode()).hexdigest()
-        existing = await session.get(CommandReceipt, receipt_id)
-        if existing:
-            return existing.result
 
         # Existing statement?
         existing_stmt = (await session.execute(
@@ -300,12 +325,18 @@ class DraftService:
                 Statement.account_id == account_id,
                 Statement.currency == currency,
                 Statement.statement_date == statement_date,
-            )
+            ).with_for_update()
         )).scalar_one_or_none()
 
         if existing_stmt:
-            if req.expected_statement_version_id and existing_stmt.current_version_id != req.expected_statement_version_id:
+            if not req.expected_statement_version_id:
+                raise ConflictError("An existing statement requires explicit version review")
+            if existing_stmt.current_version_id != req.expected_statement_version_id:
                 raise ConflictError("Statement version changed; reload")
+            from cardcue_api.services.billing import BillingService
+            paid = await BillingService()._active_paid(session, existing_stmt.id)
+            if amount_minor < paid:
+                raise ConflictError("Corrected amount is less than recorded repayments")
 
             stmt = existing_stmt
             max_ver = (await session.execute(
@@ -317,6 +348,8 @@ class DraftService:
                 version_number=max_ver + 1,
                 amount_minor=amount_minor,
                 minimum_minor=minimum_minor,
+                detail_status=detail_status,
+                **coverage,
                 source="email",
                 reason=f"Confirmed from draft {draft.id}",
                 confirmed_at=datetime.now(timezone.utc),
@@ -360,6 +393,8 @@ class DraftService:
                 version_number=1,
                 amount_minor=amount_minor,
                 minimum_minor=minimum_minor,
+                detail_status=detail_status,
+                **coverage,
                 source="email",
                 reason=f"Confirmed from draft {draft.id}",
                 confirmed_at=datetime.now(timezone.utc),
@@ -389,7 +424,18 @@ class DraftService:
                 "reason": ver.reason,
             })
 
+        for tx in selected_tx:
+            session.add(ConfirmedTransaction(
+                statement_version_id=ver.id, statement_id=stmt.id, sequence=tx.sequence,
+                transaction_date=tx.transaction_date, posting_date=tx.posting_date,
+                description=tx.description, amount_minor=tx.amount_minor,
+                currency=tx.currency, card_tail=tx.card_tail,
+                transaction_type=tx.transaction_type, source_draft_tx_id=tx.id,
+                confirmed_at=datetime.now(timezone.utc), confirmed_by=confirmed_by,
+            ))
+
         # Update draft
+        draft.detail_status = detail_status
         draft.revision += 1
         session.add(CommandReceipt(id=receipt_id, fingerprint=fingerprint, result={"version_id": str(ver.id)}))
         draft.status = "confirmed"
@@ -453,9 +499,21 @@ class DraftService:
             try:
                 drafts = await self.parse_email_source_multi(session, source.id)
                 results.extend(drafts)
-            except Exception as e:
+            except Exception as exc:
+                # A failed batch may have flushed partial drafts/transactions.
+                # Roll back before recording the source failure separately.
+                await session.rollback()
+                source = await session.get(EmailSource, source.id)
+                if source is None:
+                    continue
+                if source.parse_status == "parsed":
+                    # Reparse must not damage an already confirmed source.
+                    continue
                 source.parse_status = "failed"
-                source.error_message = "parse_failed"
+                known_codes = {"model_not_configured", "attachment_capability_unavailable",
+                               "email_source_unavailable", "attachment_unavailable",
+                               "input_exceeds_limit_manual_review_required", "no_statement_detected"}
+                source.error_message = str(exc) if str(exc) in known_codes else "parse_failed"
                 await session.flush()
                 await session.commit()
         return results

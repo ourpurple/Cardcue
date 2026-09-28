@@ -46,6 +46,16 @@ export interface AccountCard {
   created_at: string;
 }
 
+export type BillingMode = 'per_card' | 'consolidated';
+export type BillingModeSource = 'bank_default' | 'manual_override';
+
+export interface BankRule {
+  short_name: string;
+  full_names: string[];
+  code: string;
+  default_billing_mode: BillingMode | null;
+}
+
 export interface BankAccount {
   id: string;
   bank?: string;
@@ -54,6 +64,8 @@ export interface BankAccount {
   alias?: string | null;
   holder?: string | null;
   reference?: string | null;
+  billing_mode?: BillingMode | null;
+  billing_mode_source?: BillingModeSource | null;
   currency?: string;
   credit_limit_cents?: number;
   statement_day?: number;
@@ -65,9 +77,53 @@ export interface BankAccount {
   created_at: string;
 }
 
+export interface HistoricalOwnershipPreview {
+  read_only: true;
+  account: { id: string; bank: string; alias: string | null; holder: string | null; reference: string | null; billing_mode: BillingMode | null; bank_default_mode_hint: BillingMode | null; revision: number };
+  cards: { id: string; account_id: string; tail: string; display_name: string | null; status: string; revision: number }[];
+  peer_account_ids: string[];
+  statements: { id: string; account_id: string; currency: string; statement_date: string; current_version_id: string | null; version_count: number; version_ids: string[]; payment_count: number; active_payment_count: number; confirmed_transaction_count: number; observed_card_tails: string[]; proposed_account_id: null; risks: string[] }[];
+  counts: { cards: number; statements: number; versions: number; payments: number; confirmed_transactions: number; linked_drafts: number };
+  linked_drafts: { id: string; status: string; revision: number; matched_account_id: string | null; matched_card_id: string | null }[];
+  risks: string[];
+  next_step: string;
+}
+export interface HistoricalOwnershipPreflightResult {
+  read_only: true;
+  can_execute: false;
+  valid_mapping: boolean;
+  issues: string[];
+  decisions: { statement_id: string; original_account_id: string; target_account_id: string; target_card_id: string | null; version_count: number; payment_count: number; issues: string[] }[];
+  notice: string;
+}
+export interface TransactionDetail {
+  id: string;
+  sequence: number;
+  transaction_date: string | null;
+  posting_date: string | null;
+  description: string | null;
+  amount_minor: number | null;
+  currency: string | null;
+  card_tail: string | null;
+  transaction_type: string | null;
+  evidence?: { field: string; excerpt: string }[];
+  review_flags?: string[];
+}
+
+export interface SourceManifest {
+  entries: { kind: string; filename?: string | null; notes?: string | null; truncated?: boolean }[];
+  has_unsupported: boolean;
+  unsupported_files: string[];
+}
+
 export interface StatementVersion {
   id: string;
   version_number: number;
+  detail_status?: 'none' | 'partial' | 'complete';
+  expected_transaction_count?: number | null;
+  recognized_transaction_count?: number;
+  confirmed_transaction_count?: number;
+  flagged_transaction_count?: number;
   amount_minor: number;
   minimum_minor: number | null;
   source: string;
@@ -107,7 +163,25 @@ export interface StatementListItem {
   created_at: string;
 }
 
+export interface DetailSetSummary {
+  id: string;
+  statement_version_id: string;
+  revision: number;
+  detail_status: 'none' | 'partial' | 'complete';
+  source_draft_id: string | null;
+  confirmed_at: string;
+}
+
 export interface StatementDetailData extends StatementListItem {
+  detail_set_id?: string | null;
+  detail_revision?: number;
+  detail_history?: DetailSetSummary[];
+  detail_status: 'none' | 'partial' | 'complete';
+  expected_transaction_count?: number | null;
+  recognized_transaction_count?: number;
+  confirmed_transaction_count?: number;
+  flagged_transaction_count?: number;
+  transactions: TransactionDetail[];
   versions: StatementVersion[];
   payments: PaymentRecord[];
   associated_draft: {
@@ -120,6 +194,8 @@ export interface StatementDetailData extends StatementListItem {
 }
 
 export interface StatementDraftItem {
+  detail_status?: 'none' | 'partial' | 'complete';
+  source_manifest?: SourceManifest | null;
   id: string;
   email_source_id: string | null;
   status: 'pending_review' | 'confirmed' | 'rejected' | string;
@@ -144,6 +220,7 @@ export interface StatementDraftItem {
 }
 
 export interface StatementDraftDetail extends StatementDraftItem {
+  transactions: TransactionDetail[];
   evidence: any[];
   confirmed_version_id: string | null;
   rejection_reason: string | null;

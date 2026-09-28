@@ -65,6 +65,9 @@ export const DraftReview: React.FC = () => {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [currentDraft, setCurrentDraft] = useState<StatementDraftDetail | null>(null);
+  const [confirmedTransactionIds, setConfirmedTransactionIds] = useState<string[]>([]);
+  const [detailsComplete, setDetailsComplete] = useState(false);
+  const [expectedTransactionCount, setExpectedTransactionCount] = useState('');
   const [accountCardOptions, setAccountCardOptions] = useState<AccountCardOption[]>([]);
   const [selectedOption, setSelectedOption] = useState<AccountCardOption | null>(null);
 
@@ -159,6 +162,10 @@ export const DraftReview: React.FC = () => {
       const res = await draftsApi.getDraft(draftId);
       const detail: StatementDraftDetail = res.data;
       setCurrentDraft(detail);
+      // Explicit opt-in: newly extracted rows are not accepted by opening a draft.
+      setConfirmedTransactionIds([]);
+      setDetailsComplete(false);
+      setExpectedTransactionCount('');
 
       const allOptions = buildAccountCardOptions(detail.candidate_accounts || []);
       setAccountCardOptions(allOptions);
@@ -361,6 +368,15 @@ export const DraftReview: React.FC = () => {
         return;
       }
 
+      const expectedCount = expectedTransactionCount.trim();
+      if (expectedCount && (!/^[1-9]\d*$/.test(expectedCount) || Number(expectedCount) > 10000)) {
+        message.error('请填写原始账单中核对的有效交易笔数（1～10000）');
+        return;
+      }
+      if (detailsComplete && (!expectedCount || Number(expectedCount) !== currentDraft.transactions.length)) {
+        message.error('标记完整前，请依据完整来源核对笔数且与识别行数一致');
+        return;
+      }
       setActionLoading(true);
       const minMinor = values.minimum_yuan ? yuanStringToCents(values.minimum_yuan) : null;
 
@@ -374,12 +390,17 @@ export const DraftReview: React.FC = () => {
         minimum_minor: minMinor,
         statement_date: values.statement_date,
         due_date: values.due_date,
+        confirm_transaction_ids: confirmedTransactionIds,
+        details_complete: detailsComplete,
+        expected_transaction_count: expectedCount ? Number(expectedCount) : null,
       });
 
       message.success('草稿已通过并生成正式账单与待还款项');
       setDrawerVisible(false);
       fetchDrafts();
-    } catch (_) {
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      message.error(typeof detail === 'string' ? detail : '确认失败，请核对归属、来源与交易笔数后重试');
     } finally {
       setActionLoading(false);
     }
@@ -538,7 +559,7 @@ export const DraftReview: React.FC = () => {
           >
             {record.status === 'pending_review' ? '审核入账' : '查看详情'}
           </Button>
-          <Popconfirm
+          {record.status !== 'confirmed' && <Popconfirm
             title="确定删除此账单草稿吗？"
             description="删除后草稿将被清除，关联邮件将恢复待解析。"
             onConfirm={() => handleDeleteDraft(record.id)}
@@ -549,7 +570,7 @@ export const DraftReview: React.FC = () => {
             <Button type="link" danger size="small" icon={<DeleteOutlined />}>
               删除
             </Button>
-          </Popconfirm>
+          </Popconfirm>}
         </Space>
       ),
     },
@@ -742,6 +763,62 @@ export const DraftReview: React.FC = () => {
                 style={{ marginBottom: 16 }}
               />
             )}
+
+            <Card size="small" title="交易明细逐项核对" style={{ marginBottom: 16 }}>
+              <Paragraph type="secondary">
+                默认不确认任何交易。只有勾选且无待核对标记的明细才会进入正式账单；账单金额与交易金额不自动互相替代。
+              </Paragraph>
+              <Table
+                size="small"
+                rowKey="id"
+                pagination={{ pageSize: 10 }}
+                dataSource={currentDraft.transactions || []}
+                rowSelection={currentDraft.status === 'pending_review' ? {
+                  selectedRowKeys: confirmedTransactionIds,
+                  onChange: (keys) => {
+                    setConfirmedTransactionIds(keys.map(String));
+                    setDetailsComplete(false);
+                  },
+                  getCheckboxProps: (tx) => ({ disabled: !!tx.review_flags?.length || tx.amount_minor == null }),
+                } : undefined}
+                columns={[
+                  { title: '序号', dataIndex: 'sequence', width: 65 },
+                  { title: '交易日', dataIndex: 'transaction_date', render: (v: string | null) => v || '待核对' },
+                  { title: '描述', dataIndex: 'description', render: (v: string | null) => v || '待核对' },
+                  { title: '尾号', dataIndex: 'card_tail', render: (v: string | null) => v || '-' },
+                  { title: '金额', render: (_: unknown, tx: StatementDraftDetail['transactions'][number]) =>
+                    tx.amount_minor == null ? '待核对' : <CurrencyAmount cents={tx.amount_minor} currency={tx.currency || currentDraft.currency || 'CNY'} /> },
+                  { title: '状态', render: (_: unknown, tx: StatementDraftDetail['transactions'][number]) =>
+                    tx.review_flags?.length ? <Tag color="orange">{tx.review_flags.join('、')}</Tag> : <Tag color="green">可核对</Tag> },
+                ]}
+                locale={{ emptyText: '邮件中没有识别到可用的交易明细' }}
+              />
+              {currentDraft.status === 'pending_review' && !!currentDraft.transactions?.length && (
+                <div style={{ marginTop: 8 }}>
+                  <label>原始账单可核对的本账期交易总笔数（无法核实时留空）：{' '}
+                    <Input style={{ width: 110 }} value={expectedTransactionCount}
+                      onChange={e => { setExpectedTransactionCount(e.target.value); setDetailsComplete(false); }}
+                      placeholder="原文笔数" />
+                  </label>
+                </div>
+              )}
+              {currentDraft.status === 'pending_review' && !!currentDraft.transactions?.length && (
+                <label>
+                  <input type="checkbox" checked={detailsComplete}
+                    disabled={confirmedTransactionIds.length !== currentDraft.transactions.length ||
+                      Number(expectedTransactionCount) !== currentDraft.transactions.length ||
+                      !!currentDraft.source_manifest?.has_unsupported ||
+                      !currentDraft.source_manifest?.entries?.length ||
+                      !!currentDraft.source_manifest?.entries?.some(e => e.truncated || e.notes === 'file_adapter_required' || e.notes === 'unsupported_type')}
+                    onChange={e => setDetailsComplete(e.target.checked)} />
+                  {' '}我已对照完整来源逐项核对，确认本账期明细无遗漏
+                </label>
+              )}
+              <div style={{ marginTop: 8 }}><Text type="secondary">
+                来源范围：{currentDraft.source_manifest?.entries.map(e => e.filename || e.kind).join('、') || '未记录'}；
+                覆盖状态：{currentDraft.detail_status === 'complete' ? '完整' : currentDraft.detail_status === 'partial' ? '部分' : '未识别'}
+              </Text></div>
+            </Card>
 
             <Row gutter={24}>
               {/* 左侧：模型提取证据与源邮件原文 */}

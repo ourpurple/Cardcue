@@ -11,6 +11,7 @@ Covers:
 - System Status (/v1/admin/status)
 """
 
+import hashlib
 import os
 import re
 import time
@@ -37,6 +38,7 @@ from cardcue_api.admin.models import (
 from cardcue_api.admin.jobs import enqueue
 from cardcue_api.admin.schemas import (
     AccountEdit,
+    HistoricalOwnershipPreflight,
     BatchDeleteDraftsRequest,
     BatchParseRequest,
     CardEdit,
@@ -45,6 +47,7 @@ from cardcue_api.admin.schemas import (
     JobCreate,
     SourceAction,
     StatementCorrection,
+    DetailCompletion,
 )
 from cardcue_api.admin.security import audit, now, recent_admin, require_admin
 from cardcue_api.config import settings
@@ -68,12 +71,20 @@ from cardcue_api.persistence import (
     Payment,
     Statement,
     StatementDraftModel,
+    DraftTransaction,
+    ConfirmedTransaction,
+    DetailSet,
+    DetailSetTransaction,
     StatementVersion,
 )
 from cardcue_api.persistence.database import get_session
 from cardcue_api.services.auth import DeviceService
 from cardcue_api.services.billing import BillingService, ConflictError, NotFoundError
-from cardcue_api.services.drafts import DraftService
+from cardcue_api.services.ownership_preview import preview_account_history
+from cardcue_api.services.ownership_mapping import preflight_mapping
+from cardcue_api.domain.bank_rules import get_bank_rules_for_api, get_default_billing_mode
+from cardcue_api.services.drafts import DraftService, detail_coverage_status
+from cardcue_api.services.detail_sets import effective_details
 
 router = APIRouter(prefix="/v1/admin", dependencies=[Depends(require_admin)])
 billing_svc = BillingService()
@@ -81,6 +92,17 @@ draft_svc = DraftService()
 device_svc = DeviceService()
 storage_mgr = MailStorageManager()
 mime_parser = MailMimeParser()
+
+
+# ---------------------------------------------------------------------------
+# 0. Bank Rules (read-only reference data)
+# ---------------------------------------------------------------------------
+
+@router.get("/bank-rules")
+async def get_bank_rules():
+    """Return canonical bank rules. Frontend uses this instead of its own copy."""
+    return get_bank_rules_for_api()
+
 
 # ---------------------------------------------------------------------------
 # 1. Overview Dashboard
@@ -209,6 +231,8 @@ async def list_accounts(session: AsyncSession = Depends(get_session)):
         "alias": a.alias,
         "holder": a.holder,
         "reference": a.reference,
+        "billing_mode": a.billing_mode,
+        "billing_mode_source": a.billing_mode_source,
         "status": a.status,
         "revision": a.revision,
         "cards_count": len(a.cards),
@@ -226,6 +250,28 @@ async def list_accounts(session: AsyncSession = Depends(get_session)):
     } for a in accounts]
 
 
+@router.get("/accounts/{account_id}/historical-ownership-preview")
+async def get_historical_ownership_preview(
+    account_id: uuid.UUID, session: AsyncSession = Depends(get_session),
+):
+    """Inventory only. No inferred mapping and no write side effects."""
+    preview = await preview_account_history(session, account_id)
+    if preview is None:
+        raise HTTPException(404, "账户不存在")
+    return preview
+
+@router.post("/accounts/{account_id}/historical-ownership-preflight")
+async def preflight_historical_ownership(
+    account_id: uuid.UUID,
+    data: HistoricalOwnershipPreflight,
+    session: AsyncSession = Depends(get_session),
+):
+    """Check explicit decisions without changing history or approving execution."""
+    result = await preflight_mapping(session, account_id, data)
+    if result is None:
+        raise HTTPException(404, "账户不存在")
+    return result
+
 @router.post("/accounts", status_code=201)
 async def create_account(
     data: AccountCreate,
@@ -241,6 +287,8 @@ async def create_account(
         "alias": acct.alias,
         "holder": acct.holder,
         "reference": acct.reference,
+        "billing_mode": acct.billing_mode,
+        "billing_mode_source": acct.billing_mode_source,
         "status": acct.status,
         "revision": acct.revision,
         "cards_count": 0,
@@ -263,6 +311,34 @@ async def update_account(
         raise HTTPException(404, "账户不存在")
     if acct.revision != data.expected_revision:
         raise HTTPException(409, "账户已被其他操作修改，请刷新重试")
+
+    mode_changed = "billing_mode" in data.model_fields_set and data.billing_mode != acct.billing_mode
+    identity_changed = any(
+        getattr(data, field) is not None and getattr(data, field) != getattr(acct, field)
+        for field in ("bank", "holder", "reference")
+    )
+    if mode_changed or identity_changed:
+        has_statements = (await session.execute(select(Statement.id).where(
+            Statement.account_id == account_id
+        ).limit(1))).first()
+        linked_draft = (await session.execute(select(StatementDraftModel.id).where(
+            (StatementDraftModel.matched_account_id == account_id) |
+            (StatementDraftModel.matched_card_id.in_(
+                select(Card.id).where(Card.account_id == account_id)
+            ))
+        ).limit(1))).first()
+        if has_statements or linked_draft:
+            raise HTTPException(409, "账户已有正式账单或关联草稿，请先预览并人工确认归属，不能直接修改身份或还款模式")
+
+    if mode_changed:
+        if data.billing_mode == "per_card":
+            active_count = (await session.execute(select(func.count()).select_from(Card).where(
+                Card.account_id == account_id, Card.status == "active"
+            ))).scalar_one()
+            if active_count > 1:
+                raise HTTPException(409, "独立还款账户已有多张有效卡片，请先核对并整理")
+        acct.billing_mode = data.billing_mode
+        acct.billing_mode_source = "manual_override" if data.billing_mode else None
 
     if data.bank is not None:
         acct.bank = data.bank
@@ -317,21 +393,19 @@ async def delete_account(
             detail=f"该账户下已存在 {stmt_count} 笔正式账单或还款流水。为保障财务数据完整性，无法直接删除。如不再使用请使用【归档】功能隐藏该账户；若确需彻底删除，请先在账单管理中清理名下账单。"
         )
 
-    await session.execute(
-        update(StatementDraftModel)
-        .where(StatementDraftModel.matched_account_id == account_id)
-        .values(matched_account_id=None, matched_card_id=None)
-    )
+    linked_draft = (await session.execute(select(StatementDraftModel.id).where(
+        (StatementDraftModel.matched_account_id == account_id) |
+        (StatementDraftModel.matched_card_id.in_(
+            select(Card.id).where(Card.account_id == account_id)
+        ))
+    ).limit(1))).first()
+    if linked_draft:
+        raise HTTPException(409, "账户仍有关联草稿，请先核对归属；可归档账户，不能直接删除并清除匹配线索")
 
     cards = list((await session.execute(
         select(Card).where(Card.account_id == account_id)
     )).scalars().all())
     for card in cards:
-        await session.execute(
-            update(StatementDraftModel)
-            .where(StatementDraftModel.matched_card_id == card.id)
-            .values(matched_card_id=None)
-        )
         await billing_svc._log_change(session, "card", card.id, "delete", {
             "id": str(card.id),
             "account_id": str(card.account_id),
@@ -407,6 +481,8 @@ async def create_card(
         card = await billing_svc.create_card(session, data)
     except NotFoundError:
         raise HTTPException(404, "所属账户不存在")
+    except ConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
     await audit(session, actor, "card_created", str(card.id), {"tail": card.tail, "account_id": str(card.account_id)})
     await session.commit()
@@ -436,6 +512,29 @@ async def update_card(
     if card.revision != data.expected_revision:
         raise HTTPException(409, "卡片已被其他操作修改，请刷新重试")
 
+    if card.status != "active" and data.status == "active":
+        account = (await session.execute(
+            select(Account).where(Account.id == card.account_id).with_for_update()
+        )).scalar_one_or_none()
+        if not account:
+            raise HTTPException(404, "所属账户不存在")
+        if account.billing_mode == "per_card":
+            another_active = (await session.execute(select(Card.id).where(
+                Card.account_id == card.account_id, Card.id != card_id, Card.status == "active"
+            ).limit(1))).first()
+            if another_active:
+                raise HTTPException(409, "独立还款账户已有有效卡片，不能启用第二张卡")
+
+    if data.tail is not None and data.tail != card.tail:
+        has_history = (await session.execute(select(Statement.id).where(
+            Statement.account_id == card.account_id
+        ).limit(1))).first()
+        linked_draft = (await session.execute(select(StatementDraftModel.id).where(
+            (StatementDraftModel.matched_card_id == card_id) |
+            (StatementDraftModel.matched_account_id == card.account_id)
+        ).limit(1))).first()
+        if has_history or linked_draft:
+            raise HTTPException(409, "卡片有关联账单或草稿，不能直接修改尾号；请先核对历史归属")
     if data.tail is not None:
         card.tail = data.tail
     card.display_name = data.display_name
@@ -473,11 +572,18 @@ async def delete_card(
     if not card:
         raise HTTPException(404, "卡片不存在")
 
-    await session.execute(
-        update(StatementDraftModel)
-        .where(StatementDraftModel.matched_card_id == card_id)
-        .values(matched_card_id=None)
-    )
+    # Statements have no reliable card FK; deletion cannot be proven safe.
+    has_history = (await session.execute(
+        select(Statement.id).where(Statement.account_id == card.account_id).limit(1)
+    )).first()
+    linked_draft = (await session.execute(
+        select(StatementDraftModel.id).where(
+            (StatementDraftModel.matched_card_id == card_id) |
+            (StatementDraftModel.matched_account_id == card.account_id)
+        ).limit(1)
+    )).first()
+    if has_history or linked_draft:
+        raise HTTPException(409, "卡片关联历史账单或草稿，请停用归档；不得普通删除")
 
     await billing_svc._log_change(session, "card", card.id, "delete", {
         "id": str(card.id),
@@ -519,12 +625,27 @@ async def split_card_to_new_account(
 
     old_acct = (await session.execute(
         select(Account).where(Account.id == card.account_id)
-        .options(selectinload(Account.cards))
+        .options(selectinload(Account.cards)).with_for_update()
     )).scalar_one_or_none()
     if not old_acct:
         raise HTTPException(404, "所属账户不存在")
 
     active_cards = [c for c in old_acct.cards if c.status == "active"]
+    if card.status != "active" or old_acct.status != "active":
+        raise HTTPException(409, "只能拆分有效账户中的有效卡片；停用对象请先核对")
+    if old_acct.billing_mode != "per_card":
+        raise HTTPException(409, "只有模式明确为独立还款的无历史账户可普通拆卡")
+    has_history = (await session.execute(
+        select(Statement.id).where(Statement.account_id == old_acct.id).limit(1)
+    )).first()
+    linked_draft = (await session.execute(
+        select(StatementDraftModel.id).where(
+            (StatementDraftModel.matched_account_id == old_acct.id) |
+            (StatementDraftModel.matched_card_id == card_id)
+        ).limit(1)
+    )).first()
+    if has_history or linked_draft:
+        raise HTTPException(409, "账户已有账单或关联草稿，请先预览并确认归属，不能普通拆卡")
     if len(active_cards) <= 1:
         raise HTTPException(400, "该账户仅有一张有效卡片，无需拆分")
 
@@ -537,17 +658,27 @@ async def split_card_to_new_account(
         holder=old_acct.holder,
         reference=None,
         status="active",
+        billing_mode=old_acct.billing_mode,
+        billing_mode_source=old_acct.billing_mode_source,
     )
     session.add(new_acct)
     await session.flush()  # get new_acct.id
 
     # Move the card
     card.account_id = new_acct.id
+    card.revision += 1
+    old_acct.revision += 1
+    old_acct.updated_at = now()
+    await billing_svc._log_change(session, "account", old_acct.id, "update", {
+        "id": str(old_acct.id), "revision": old_acct.revision,
+        "reason": "card_split", "card_id": str(card.id),
+    })
 
     await billing_svc._log_change(session, "card", card.id, "split", {
         "old_account_id": str(old_acct.id),
         "new_account_id": str(new_acct.id),
         "tail": card.tail,
+        "revision": card.revision,
     })
     await audit(session, actor, "card_split", str(card.id), {
         "old_account_id": str(old_acct.id),
@@ -568,6 +699,16 @@ async def split_card_to_new_account(
 # ---------------------------------------------------------------------------
 # 3. Statements & Payments
 # ---------------------------------------------------------------------------
+
+def _transaction_data(tx):
+    return {
+        "id": str(tx.id), "sequence": tx.sequence,
+        "transaction_date": tx.transaction_date, "posting_date": tx.posting_date,
+        "description": tx.description, "amount_minor": tx.amount_minor,
+        "currency": tx.currency, "card_tail": tx.card_tail,
+        "transaction_type": tx.transaction_type,
+    }
+
 
 @router.get("/statements")
 async def list_statements(
@@ -694,7 +835,7 @@ async def get_statement_detail(
     version_ids = [v.id for v in stmt.versions]
     draft_row = (await session.execute(
         select(StatementDraftModel)
-        .where(StatementDraftModel.confirmed_version_id.in_(version_ids))
+        .where(StatementDraftModel.confirmed_version_id == stmt.current_version_id)
     )).scalars().first()
 
     draft_info = None
@@ -709,6 +850,8 @@ async def get_statement_detail(
     detail_cards = (await session.execute(
         select(Card.tail).where(Card.account_id == stmt.account_id, Card.status == "active")
     )).scalars().all()
+
+    active_detail_set, current_transactions = await effective_details(session, stmt.current_version_id) if stmt.current_version_id else (None, [])
 
     return {
         "id": str(stmt.id),
@@ -728,6 +871,11 @@ async def get_statement_detail(
         "versions": [{
             "id": str(v.id),
             "version_number": v.version_number,
+            "detail_status": v.detail_status,
+            "expected_transaction_count": v.expected_transaction_count,
+            "recognized_transaction_count": v.recognized_transaction_count,
+            "confirmed_transaction_count": v.confirmed_transaction_count,
+            "flagged_transaction_count": v.flagged_transaction_count,
             "amount_minor": v.amount_minor,
             "minimum_minor": v.minimum_minor,
             "source": v.source,
@@ -745,11 +893,214 @@ async def get_statement_detail(
             "revoked_at": p.revoked_at,
             "revoke_reason": p.revoke_reason,
         } for p in sorted_payments],
+        "detail_status": active_detail_set.detail_status if active_detail_set else (cur_ver.detail_status if cur_ver else "none"),
+        "expected_transaction_count": getattr(active_detail_set, "expected_transaction_count") if active_detail_set else (cur_ver.expected_transaction_count if cur_ver else None),
+        "recognized_transaction_count": getattr(active_detail_set, "recognized_transaction_count") if active_detail_set else (cur_ver.recognized_transaction_count if cur_ver else 0),
+        "confirmed_transaction_count": getattr(active_detail_set, "confirmed_transaction_count") if active_detail_set else (cur_ver.confirmed_transaction_count if cur_ver else 0),
+        "flagged_transaction_count": getattr(active_detail_set, "flagged_transaction_count") if active_detail_set else (cur_ver.flagged_transaction_count if cur_ver else 0),
+        "transactions": [_transaction_data(tx) for tx in current_transactions],
+        "detail_set_id": str(active_detail_set.id) if active_detail_set else None,
+        "detail_revision": active_detail_set.revision if active_detail_set else 0,
+        "detail_history": [{"statement_version_id": str(ds.statement_version_id), "id": str(ds.id), "revision": ds.revision, "detail_status": ds.detail_status, "source_draft_id": str(ds.source_draft_id) if ds.source_draft_id else None, "confirmed_at": ds.confirmed_at} for ds in (await session.execute(select(DetailSet).join(StatementVersion, DetailSet.statement_version_id == StatementVersion.id).where(StatementVersion.statement_id == stmt.id).order_by(StatementVersion.version_number.desc(), DetailSet.revision.desc()))).scalars().all()] if stmt.current_version_id else [],
         "associated_draft": draft_info,
         "created_at": stmt.created_at,
         "updated_at": stmt.updated_at,
     }
 
+
+@router.get("/statements/{statement_id}/details/{detail_set_id}")
+async def get_detail_set(
+    statement_id: uuid.UUID,
+    detail_set_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    """Read a historical immutable detail snapshot, scoped to its statement."""
+    detail_set = (await session.execute(
+        select(DetailSet).join(StatementVersion, DetailSet.statement_version_id == StatementVersion.id)
+        .where(DetailSet.id == detail_set_id, StatementVersion.statement_id == statement_id)
+    )).scalar_one_or_none()
+    if not detail_set:
+        raise HTTPException(404, "明细版本不存在")
+    rows = (await session.execute(select(DetailSetTransaction).where(
+        DetailSetTransaction.detail_set_id == detail_set.id
+    ).order_by(DetailSetTransaction.sequence))).scalars().all()
+    return {
+        "id": str(detail_set.id), "statement_version_id": str(detail_set.statement_version_id),
+        "revision": detail_set.revision, "detail_status": detail_set.detail_status,
+        "expected_transaction_count": detail_set.expected_transaction_count,
+        "recognized_transaction_count": detail_set.recognized_transaction_count,
+        "confirmed_transaction_count": detail_set.confirmed_transaction_count,
+        "flagged_transaction_count": detail_set.flagged_transaction_count,
+        "source_draft_id": str(detail_set.source_draft_id) if detail_set.source_draft_id else None,
+        "confirmed_at": detail_set.confirmed_at,
+        "transactions": [_transaction_data(row) for row in rows],
+    }
+
+def _detail_request_fingerprint(statement_id: uuid.UUID, data: DetailCompletion) -> str:
+    payload = data.model_dump_json(exclude={"request_id"})
+    return "details:" + hashlib.sha256(f"{statement_id}:{payload}".encode("utf-8")).hexdigest()
+
+@router.post("/statements/{statement_id}/details/complete")
+async def complete_statement_details(
+    statement_id: uuid.UUID,
+    data: DetailCompletion,
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Review a later draft into an immutable detail snapshot; never change debt."""
+    fingerprint = _detail_request_fingerprint(statement_id, data)
+    receipt = await session.get(CommandReceipt, data.request_id)
+    if receipt:
+        if receipt.fingerprint != fingerprint:
+            raise HTTPException(409, "请求编号已用于其他操作")
+        return receipt.result
+
+    # Match confirm_draft lock ordering (draft before statement) to avoid a
+    # draft-confirm/detail-completion deadlock on the same two rows.
+    draft = (await session.execute(select(StatementDraftModel).where(
+        StatementDraftModel.id == data.draft_id
+    ).with_for_update())).scalar_one_or_none()
+    if not draft:
+        raise HTTPException(404, "明细草稿不存在")
+    if draft.status != "pending_review" or draft.revision != data.expected_draft_revision:
+        raise HTTPException(409, "草稿已变化，请刷新")
+
+    stmt = (await session.execute(select(Statement).where(
+        Statement.id == statement_id
+    ).with_for_update())).scalar_one_or_none()
+    if not stmt:
+        raise HTTPException(404, "账单不存在")
+    if stmt.current_version_id != data.expected_version_id:
+        raise HTTPException(409, "账单版本已变化，请刷新")
+    version = await session.get(StatementVersion, stmt.current_version_id)
+    active, old_rows = await effective_details(session, version.id)
+    if data.expected_detail_revision != (active.revision if active else 0):
+        raise HTTPException(409, "明细版本已变化，请刷新")
+
+    if draft.matched_account_id and draft.matched_account_id != stmt.account_id:
+        raise HTTPException(409, "草稿匹配了其他账户")
+    if (draft.currency and draft.currency != stmt.currency) or (
+        draft.statement_date and draft.statement_date != stmt.statement_date
+    ) or (draft.due_date and draft.due_date != stmt.due_date) or (
+        draft.amount_minor is not None and draft.amount_minor != version.amount_minor
+    ):
+        raise HTTPException(409, "草稿汇总与账单不符，不能仅补明细")
+    account = await session.get(Account, stmt.account_id)
+    from cardcue_api.domain.bank_rules import normalise_bank_name
+    if not account or account.status != "active" or not account.billing_mode or (
+        draft.bank and normalise_bank_name(draft.bank) != normalise_bank_name(account.bank)
+    ):
+        raise HTTPException(409, "还款账户或银行归属待核对")
+    cards = list((await session.execute(select(Card).where(
+        Card.account_id == account.id, Card.status == "active"
+    ))).scalars().all())
+    card_tails = {card.tail for card in cards}
+    if account.billing_mode == "per_card" and (len(cards) != 1 or (
+        draft.card_tails and (len(set(draft.card_tails)) != 1 or cards[0].tail not in draft.card_tails)
+    )):
+        raise HTTPException(409, "独立还款卡归属不明确")
+    if draft.matched_card_id and draft.matched_card_id not in {card.id for card in cards}:
+        raise HTTPException(409, "草稿匹配了其他卡片")
+    if any(tail not in card_tails for tail in (draft.card_tails or [])):
+        raise HTTPException(409, "卡尾号不属于目标账户")
+
+    rows = list((await session.execute(select(DraftTransaction).where(
+        DraftTransaction.draft_id == draft.id
+    ).order_by(DraftTransaction.sequence))).scalars().all())
+    selected_ids = set(data.confirm_transaction_ids)
+    if len(selected_ids) != len(data.confirm_transaction_ids) or not selected_ids.issubset({row.id for row in rows}):
+        raise HTTPException(409, "明细选择重复或不属于该草稿")
+    selected = [row for row in rows if row.id in selected_ids]
+    if not selected:
+        raise HTTPException(409, "至少选择一条可核对明细")
+    for row in selected:
+        if row.amount_minor is None or row.amount_minor == 0 or row.currency != stmt.currency or row.review_flags:
+            raise HTTPException(409, "明细金额、币种或待核对标记无效")
+        if row.card_tail and row.card_tail not in card_tails:
+            raise HTTPException(409, "明细卡片不属于目标账户")
+
+    preserved = [] if data.replace_existing else old_rows
+    if not data.replace_existing:
+        # Appending is only safe when every existing line and the new draft
+        # retain a source identity. A tail/amount/merchant is not a reliable
+        # transaction identity; require an explicit replacement otherwise.
+        if old_rows and (not draft.email_source_id or any(
+            not row.source_draft_tx_id for row in old_rows
+        )):
+            raise HTTPException(409, "已有明细缺少可核验来源；请核对原文后明确使用替换快照")
+        existing_ids = {row.source_draft_tx_id for row in old_rows if row.source_draft_tx_id}
+        if existing_ids & selected_ids:
+            raise HTTPException(409, "明细已确认，不能重复添加")
+        # Re-parsed drafts may have new row IDs for the same email. Reject
+        # source overlap instead of guessing whether two similar rows are distinct.
+        if existing_ids:
+            existing_sources = set((await session.execute(
+                select(StatementDraftModel.email_source_id).join(
+                    DraftTransaction, DraftTransaction.draft_id == StatementDraftModel.id
+                ).where(DraftTransaction.id.in_(existing_ids))
+            )).scalars().all())
+            if not existing_sources or None in existing_sources:
+                raise HTTPException(409, "已有明细的邮件来源不可核验；请明确使用替换快照")
+            if draft.email_source_id in existing_sources:
+                raise HTTPException(409, "同一邮件来源已有明细；请明确使用替换快照")
+
+    total_count = len(preserved) + len(selected)
+    expected = data.expected_transaction_count
+    if expected is not None and expected < total_count:
+        raise HTTPException(409, "预期笔数小于已核对笔数")
+    if data.details_complete and not data.replace_existing and old_rows:
+        raise HTTPException(409, "已有部分明细时，完整性需以全量替换快照核对")
+    recognized = len(rows) + (0 if data.replace_existing else (
+        active.recognized_transaction_count if active else (version.recognized_transaction_count or len(old_rows))
+    ))
+    flagged = sum(bool(row.review_flags) for row in rows) + (0 if data.replace_existing else (
+        active.flagged_transaction_count if active else (version.flagged_transaction_count or 0)
+    ))
+    try:
+        detail_status = detail_coverage_status(
+            recognized=recognized, confirmed=total_count, flagged=flagged,
+            expected=expected, complete=data.details_complete,
+            manifest=draft.source_manifest if data.replace_existing or not old_rows else None,
+        )
+    except ConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    snapshot = DetailSet(
+        statement_version_id=version.id, revision=data.expected_detail_revision + 1,
+        source_draft_id=draft.id, detail_status=detail_status,
+        expected_transaction_count=expected, recognized_transaction_count=recognized,
+        confirmed_transaction_count=total_count, flagged_transaction_count=flagged,
+        confirmed_at=now(), confirmed_by="admin:" + actor.id,
+    )
+    session.add(snapshot)
+    await session.flush()
+    for sequence, row in enumerate([*preserved, *selected], start=1):
+        session.add(DetailSetTransaction(
+            detail_set_id=snapshot.id, sequence=sequence,
+            transaction_date=row.transaction_date, posting_date=row.posting_date,
+            description=row.description, amount_minor=row.amount_minor,
+            currency=row.currency, card_tail=row.card_tail, transaction_type=row.transaction_type,
+            source_draft_tx_id=row.source_draft_tx_id if row in preserved else row.id,
+            confirmed_at=row.confirmed_at if row in preserved else snapshot.confirmed_at,
+            confirmed_by=row.confirmed_by if row in preserved else snapshot.confirmed_by,
+        ))
+    draft.status = "confirmed"
+    draft.confirmed_version_id = version.id
+    draft.matched_account_id = account.id
+    draft.matched_card_id = cards[0].id if account.billing_mode == "per_card" else draft.matched_card_id
+    draft.detail_status = detail_status
+    draft.revision += 1
+    result = {
+        "statement_id": str(stmt.id), "version_id": str(version.id),
+        "detail_set_id": str(snapshot.id), "detail_revision": snapshot.revision,
+        "detail_status": detail_status, "confirmed_transaction_count": total_count,
+    }
+    session.add(CommandReceipt(id=data.request_id, fingerprint=fingerprint, result=result))
+    await audit(session, actor, "statement_details_completed", str(stmt.id), {
+        "detail_set_id": str(snapshot.id), "detail_revision": snapshot.revision,
+        "confirmed_transaction_count": total_count,
+    })
+    await session.commit()
+    return result
 
 @router.post("/statements/{statement_id}/correct")
 async def correct_statement(
@@ -775,6 +1126,9 @@ async def correct_statement(
     if not cur_ver:
         raise HTTPException(409, "账单当前生效版本缺失")
 
+    # The statement row is locked while we copy the old immutable detail set.
+    # A correction must not make reviewed rows disappear from the effective version.
+    active_detail_set, current_transactions = await effective_details(session, cur_ver.id)
     active_paid = await billing_svc._active_paid(session, stmt.id)
     if data.amount_minor < active_paid:
         raise HTTPException(
@@ -782,11 +1136,28 @@ async def correct_statement(
             f"更正金额({data.amount_minor}分)不得低于已有效还款总额({active_paid}分)",
         )
 
+    # A changed total invalidates a previous "complete" claim until reviewed again.
+    # Keep older coverage evidence, but do not fabricate completeness for legacy rows.
+    detail_status = active_detail_set.detail_status if active_detail_set else cur_ver.detail_status
+    if detail_status == "none" and current_transactions:
+        detail_status = "partial"
+    if detail_status == "complete" and (
+        data.amount_minor != cur_ver.amount_minor or
+        (active_detail_set.confirmed_transaction_count if active_detail_set else cur_ver.confirmed_transaction_count) != len(current_transactions) or
+        not current_transactions
+    ):
+        detail_status = "partial" if current_transactions else "none"
+
     new_ver = StatementVersion(
         statement_id=stmt.id,
         version_number=cur_ver.version_number + 1,
         amount_minor=data.amount_minor,
         minimum_minor=data.minimum_minor,
+        detail_status=detail_status,
+        expected_transaction_count=(getattr(active_detail_set, "expected_transaction_count") if active_detail_set else cur_ver.expected_transaction_count),
+        recognized_transaction_count=(getattr(active_detail_set, "recognized_transaction_count") if active_detail_set else cur_ver.recognized_transaction_count),
+        confirmed_transaction_count=len(current_transactions),
+        flagged_transaction_count=(getattr(active_detail_set, "flagged_transaction_count") if active_detail_set else cur_ver.flagged_transaction_count),
         source="manual_correction",
         reason=data.reason,
         confirmed_at=now(),
@@ -795,9 +1166,30 @@ async def correct_statement(
     session.add(new_ver)
     await session.flush()
 
+    for tx in current_transactions:
+        session.add(ConfirmedTransaction(
+            statement_version_id=new_ver.id, statement_id=stmt.id,
+            sequence=tx.sequence, transaction_date=tx.transaction_date,
+            posting_date=tx.posting_date, description=tx.description,
+            amount_minor=tx.amount_minor, currency=tx.currency,
+            card_tail=tx.card_tail, transaction_type=tx.transaction_type,
+            source_draft_tx_id=tx.source_draft_tx_id,
+            confirmed_at=tx.confirmed_at, confirmed_by=tx.confirmed_by,
+        ))
+    await session.flush()
+
     stmt.current_version_id = new_ver.id
     stmt.updated_at = now()
 
+    await billing_svc._log_change(session, "statement_version", new_ver.id, "create", {
+        "id": str(new_ver.id),
+        "statement_id": str(stmt.id),
+        "version_number": new_ver.version_number,
+        "amount_minor": new_ver.amount_minor,
+        "minimum_minor": new_ver.minimum_minor,
+        "source": new_ver.source,
+        "reason": new_ver.reason,
+    })
     await billing_svc._log_change(session, "statement", stmt.id, "update", {
         "id": str(stmt.id),
         "account_id": str(stmt.account_id),
@@ -817,6 +1209,8 @@ async def correct_statement(
         "amount_minor": new_ver.amount_minor,
         "minimum_minor": new_ver.minimum_minor,
         "remaining_minor": new_ver.amount_minor - active_paid,
+        "detail_status": new_ver.detail_status,
+        "confirmed_transaction_count": new_ver.confirmed_transaction_count,
         "reason": new_ver.reason,
     }
 
@@ -929,9 +1323,14 @@ async def delete_statement(
     if not stmt:
         raise HTTPException(404, "账单不存在")
 
+    if (await session.execute(select(DetailSet.id).join(
+        StatementVersion, DetailSet.statement_version_id == StatementVersion.id
+    ).where(StatementVersion.statement_id == stmt.id).limit(1))).first():
+        raise HTTPException(409, "已有不可变明细历史，不能删除账单")
     # 1. 解开 Statement.current_version_id 与 StatementVersion 间的循环外键约束
     stmt.current_version_id = None
     await session.flush()
+
 
     # 2. 解除草稿关联引用（将关联到该账单版本的草稿重置为待审核，清空 confirmed_version_id）
     version_ids = [v.id for v in stmt.versions]
@@ -951,6 +1350,14 @@ async def delete_statement(
             "currency": p.currency,
         })
         await session.delete(p)
+
+    # Delete detail rows before their version/statement foreign keys.
+    confirmed_details = (await session.execute(select(ConfirmedTransaction).where(
+        ConfirmedTransaction.statement_id == stmt.id
+    ))).scalars().all()
+    for tx in confirmed_details:
+        await session.delete(tx)
+    await session.flush()
 
     # 4. 级联清理名下的不可变版本记录，记录移动端同步 change_log
     for v in stmt.versions:
@@ -1279,6 +1686,8 @@ async def list_drafts(
             "account_reference": d.account_reference,
             "card_tails": d.card_tails or [],
             "review_reasons": d.review_reasons or [],
+            "detail_status": d.detail_status,
+            "source_manifest": d.source_manifest,
             "matched_account_id": str(d.matched_account_id) if d.matched_account_id else None,
             "matched_account_name": (acct_alias or acct_bank) if acct_bank else None,
             "matched_account_bank": acct_bank,
@@ -1329,6 +1738,11 @@ async def get_draft_detail(
                 "email_date": source.email_date,
             }
 
+    draft_transactions = list((await session.execute(
+        select(DraftTransaction).where(DraftTransaction.draft_id == draft.id)
+        .order_by(DraftTransaction.sequence)
+    )).scalars().all())
+
     return {
         "id": str(draft.id),
         "email_source_id": str(draft.email_source_id) if draft.email_source_id else None,
@@ -1342,6 +1756,10 @@ async def get_draft_detail(
         "account_reference": draft.account_reference,
         "card_tails": draft.card_tails or [],
         "evidence": draft.evidence or [],
+        "source_manifest": draft.source_manifest,
+        "detail_status": draft.detail_status,
+        "transactions": [{**_transaction_data(tx), "evidence": tx.evidence or [],
+                          "review_flags": tx.review_flags or []} for tx in draft_transactions],
         "review_reasons": draft.review_reasons or [],
         "matched_account_id": str(draft.matched_account_id) if draft.matched_account_id else None,
         "matched_card_id": str(draft.matched_card_id) if draft.matched_card_id else None,
@@ -1484,6 +1902,32 @@ async def reject_draft(
     return {"draft_id": str(draft.id), "status": draft.status}
 
 
+async def _delete_draft_with_transactions(session: AsyncSession, draft: StatementDraftModel) -> None:
+    # A confirmed detail may reference the draft row for provenance. Never
+    # remove that source by cascading or silently detaching the link.
+    if draft.status == "confirmed":
+        raise HTTPException(409, "已确认草稿及明细需保留来源，不能删除")
+    tx_ids = select(DraftTransaction.id).where(DraftTransaction.draft_id == draft.id)
+    referenced = (await session.execute(select(ConfirmedTransaction.id).where(
+        ConfirmedTransaction.source_draft_tx_id.in_(tx_ids)
+    ).limit(1))).first()
+    if referenced:
+        raise HTTPException(409, "明细已被正式账单引用，不能删除草稿")
+    if (await session.execute(select(DetailSet.id).where(
+        DetailSet.source_draft_id == draft.id
+    ).limit(1))).first() or (await session.execute(select(DetailSetTransaction.id).where(
+        DetailSetTransaction.source_draft_tx_id.in_(tx_ids)
+    ).limit(1))).first():
+        raise HTTPException(409, "明细快照已引用该草稿，不能删除")
+    transactions = (await session.execute(select(DraftTransaction).where(
+        DraftTransaction.draft_id == draft.id
+    ))).scalars().all()
+    for tx in transactions:
+        await session.delete(tx)
+    await session.flush()
+    await session.delete(draft)
+
+
 @router.delete("/drafts/{draft_id}")
 async def delete_draft(
     draft_id: uuid.UUID,
@@ -1498,7 +1942,7 @@ async def delete_draft(
     bank = draft.bank
     status = draft.status
 
-    await session.delete(draft)
+    await _delete_draft_with_transactions(session, draft)
     await session.flush()
 
     if email_source_id:
@@ -1532,7 +1976,7 @@ async def batch_delete_drafts(
 
     email_source_ids = {d.email_source_id for d in drafts if d.email_source_id}
     for d in drafts:
-        await session.delete(d)
+        await _delete_draft_with_transactions(session, d)
 
     await session.flush()
 
@@ -1565,7 +2009,7 @@ async def clear_drafts(
     drafts = list((await session.execute(query)).scalars().all())
     email_source_ids = {d.email_source_id for d in drafts if d.email_source_id}
     for d in drafts:
-        await session.delete(d)
+        await _delete_draft_with_transactions(session, d)
 
     await session.flush()
 

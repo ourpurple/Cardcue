@@ -55,7 +55,13 @@ class BillingService:
     # ---- Account ----
 
     async def create_account(self, session: AsyncSession, data: AccountCreate) -> Account:
-        acct = Account(bank=data.bank, alias=data.alias, holder=data.holder, reference=data.reference)
+        from cardcue_api.domain.bank_rules import get_default_billing_mode
+        default_mode = get_default_billing_mode(data.bank)
+        mode = data.billing_mode if data.billing_mode is not None else default_mode
+        source = ("manual_override" if data.billing_mode is not None and data.billing_mode != default_mode
+                  else "bank_default") if mode else None
+        acct = Account(bank=data.bank, alias=data.alias, holder=data.holder,
+                       reference=data.reference, billing_mode=mode, billing_mode_source=source)
         session.add(acct)
         await session.flush()
         await session.refresh(acct)
@@ -99,7 +105,18 @@ class BillingService:
     # ---- Card ----
 
     async def create_card(self, session: AsyncSession, data: CardCreate) -> Card:
-        await self.get_account(session, data.account_id)  # verify FK
+        # Serialize card creation with reactivation and mode changes on the account row.
+        acct = (await session.execute(select(Account).where(
+            Account.id == data.account_id
+        ).with_for_update())).scalar_one_or_none()
+        if not acct:
+            raise NotFoundError(f"Account {data.account_id} not found")
+        if acct.billing_mode == "per_card":
+            active = (await session.execute(select(Card.id).where(
+                Card.account_id == data.account_id, Card.status == "active"
+            ))).first()
+            if active:
+                raise ConflictError("独立还款账户只能有一张有效卡片")
         card = Card(account_id=data.account_id, display_name=data.display_name, tail=data.tail)
         session.add(card)
         await session.flush()

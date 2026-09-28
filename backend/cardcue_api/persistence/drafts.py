@@ -42,6 +42,8 @@ class StatementDraftModel(Base):
     card_tails: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     review_reasons: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    source_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    detail_status: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
     matched_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )

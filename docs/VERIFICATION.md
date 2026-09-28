@@ -1,3 +1,61 @@
+## 2026-09-28 V2 历史归属预检加固（非验收）
+
+- 仅加强只读预检：阻断归档目标账户、独立还款无唯一有效卡／指定归档卡、同账单已确认明细出现多个卡尾号仍整体映射单卡、当前版本不在该账单版本清单及原归属与预览不一致。归档兄弟卡不计入唯一有效卡；普通人工复核提示不直接否定显式映射。页面禁用归档账户候选，卡候选仅显示有效卡。
+- 合成场景运行 `python -m pytest backend/tests/test_bank_rules.py backend/tests/test_legacy_card_guards.py backend/tests/test_ownership_mapping.py backend/tests/test_ownership_preview.py backend/tests/test_parsing_v2.py backend/tests/test_statement_correction_details.py backend/tests/test_detail_sets.py -q`：**119 passed**（全局 Python 环境的 pytest-asyncio 1.4.0）。`web` 目录执行 `npm run build`：TypeScript／Vite 通过，Ant Design 分包体积警告仍在。
+- `backend/.venv` 的 pytest-asyncio 0.26.0 与当前 session-scope event_loop 配置冲突，按原命令收集即报 `MultipleEventLoopsRequestedError`；不将其误记为业务测试失败，也未改动全局测试配置。只读预检始终 `can_execute=false`，没有迁移入口；仍缺隔离 PostgreSQL、备份恢复、实际并发和人工核对验证，未触碰用户数据库或真实邮件。
+
+---
+## 2026-09-28 V2 后补明细来源与锁顺序防护（非验收）
+
+- 追加明细要求旧逐笔来源 ID、新草稿邮件来源及旧来源查询结果均可核验；来源不明或同邮件重解析不得直接追加，可由管理员核对原文后明确选择全量替换，旧快照不被修改。统一后补与普通草稿确认的锁顺序为“草稿→账单”，避免反向锁序导致的潜在死锁。
+- 新增缺失来源的多种合成场景、显式替换保留旧行及锁顺序回归断言；选定 V2 后台合成测试 **115 passed**，Python 编译及 `git diff --check` 通过（只有 Git 行尾转换警告）。
+- **未验收**：上述断言不是数据库并发实测；仍需隔离 PostgreSQL 迁移、真实行锁与回滚验证，未触碰用户数据库、真实邮件或付费模型。
+
+---
+
+## 2026-09-28 V2 管理后台明细后补界面增量验证（非验收）
+
+- 账单详情增加后补入口，可选择最近候选草稿或输入草稿 ID，逐笔勾选可核对交易，明确选择追加／全量替换，录入来源预期笔数并在证据齐全时显式标记完整；明细快照历史可只读查看。提交携带账单版本、明细修订与草稿修订，冲突不自动覆盖。
+- `web` 目录执行 `npm run build`：TypeScript 与 Vite 构建通过；Vite 提示 Ant Design 分包超过 500 kB。后端相关合成测试 **110 passed**、Python 编译通过、Alembic `0012 (head)`；`git diff --check` 无空白错误（Git 行尾转换警告）。
+- **未验收**：未接真实邮件／模型、未在浏览器端做人工交互和端到端验证；未对用户数据库迁移，尚缺隔离 PostgreSQL 迁移、约束、并发、回滚及 Android 设备验证。
+
+---
+
+## 2026-09-28 V2 明细后补版本增量验证（非验收）
+
+- 后端增加 `0012` 非破坏性明细集迁移、纯明细后补确认 API、账单详情生效明细读取、历史明细集查询及金额更正时明细继承；无账单金额／还款写入，旧明细快照保留。确认草稿与账单行锁、预期修订、请求指纹幂等、重复来源保护和完整性保守判断均有合成测试。
+- 执行 `python -m alembic -c backend/alembic.ini heads`：`0012 (head)`；`python -m pytest backend/tests/test_bank_rules.py backend/tests/test_legacy_card_guards.py backend/tests/test_ownership_mapping.py backend/tests/test_ownership_preview.py backend/tests/test_parsing_v2.py backend/tests/test_statement_correction_details.py backend/tests/test_detail_sets.py -q`：**110 passed**（合成测试）；相关 Python 编译通过。
+- **未验收**：未迁移用户数据库；未在隔离 PostgreSQL 上实测迁移、约束、行锁和回滚；后台网页已接入但尚未做浏览器端到端验证；未做 Android 构建／设备测试或真实邮件模型质量验证。不能把合成测试当成上线验收。
+
+---
+
+## 2026-09-28 V2 人工更正明细保留增量验证（非验收）
+
+- 账单人工更正创建新版本时保留当前确认明细及来源关联，不修改旧版本；总额变更、覆盖计数不可信或旧版本无明细时，完整状态按证据降级。更正记录版本新增与账单更新的变更日志；草稿确认命中已有账单时加行锁检查版本。
+- 合成测试覆盖同额更正、金额变更、旧版无明细、旧版覆盖状态缺失、过期版本冲突。运行 `python -m pytest backend/tests/test_statement_correction_details.py backend/tests/test_legacy_card_guards.py backend/tests/test_bank_rules.py backend/tests/test_ownership_preview.py backend/tests/test_ownership_mapping.py backend/tests/test_parsing_v2.py backend/tests/test_contracts.py -q`：**112 passed**；相关 Python 文件编译与 `git diff --check` 通过。
+- 此处只验证合成测试：隔离 PostgreSQL 迁移、行锁并发和数据回滚验证仍缺；未接触用户数据库，未做 Android 或 Web 端到端验证。纯明细后补全仍未实现。
+
+---
+
+## 2026-09-28 V2 账户与卡片防绕过增量验证（非验收）
+
+- 合成数据覆盖独立还款卡恢复、卡尾号编辑、账户身份／模式编辑、带草稿匹配的账户和卡片删除、停用卡普通拆分及无冲突恢复等。运行 `python -m pytest backend/tests/test_legacy_card_guards.py backend/tests/test_bank_rules.py backend/tests/test_ownership_preview.py backend/tests/test_ownership_mapping.py backend/tests/test_parsing_v2.py backend/tests/test_contracts.py -q`：**107 passed**；相关 Python 文件编译通过，`git diff --check` 无空白错误。
+- 后台新增卡及恢复卡通过账户行锁串行校验，但尚未在升级后的隔离 PostgreSQL 中测试并发、事务、迁移和备份恢复；未执行历史归属迁移，未连接用户数据库。Web 构建结果沿用此前验证，本轮未重跑；Android 构建与设备验证未进行。
+
+---
+
+## 2026-09-28 解析 V2 阶段性验证（尚未完成验收）
+
+- 显式映射只读预检与旧拆卡／删除保护：新增合成数据测试 11 项；与原 78 项联合共 89 项通过。目标账户／卡片均由管理员明确选择，检查账单版本、账户修订和目标账期冲突；预检响应明确不可执行。已有账单或草稿时普通拆卡／删除卡片返回 409。管理后台构建通过。尚无执行迁移、备份证明和隔离 PostgreSQL 集成验收。
+- 历史归属只读预览：新增合成数据测试 4 项；联合原解析相关测试共 78 项通过。预览不设置拟调整目标，也不执行合并、拆分或模式回填；后台页面构建成功（Vite 包体积警告）。预览接口数据库集成测试、备份恢复、人工确认迁移仍待实施。未在用户数据库执行迁移。
+
+- 合成数据单元／契约测试：`tests/test_parsing_v2.py`、`tests/test_bank_rules.py`、`tests/test_contracts.py` 共 74 项通过；包括 HTML 表格保留、附件清单但拒绝假解析、笔数覆盖状态和严格金额／日期。
+- 后台 Python 编译通过；`web` 的 `npm run build` 通过，仅有 Vite 包体积警告。
+- 增量迁移 `0008`～`0011` 尚未在用户数据库执行。此前数据库集成测试发现本机测试库缺少 `accounts.billing_mode` 等新列；不能因此宣称数据库集成测试通过。应在隔离测试库完成迁移和验证，先备份并验证恢复路径后才考虑现有数据迁移。
+- 通用文本模型接口暂不支持直接提交附件；PDF／图片标记为待适配并阻断解析，没有调用真实模型或验证真实账单质量。历史归属人工确认迁移和独立明细补全版本仍待实现。Android 未构建和设备验证，不宣称 APK 可用。
+
+---
+
 # 首版验证记录
 
 更新日期：2026-09-19。状态：**P0、S1、A1、S2+A2、S3、S4、R1 全部交付通过；真机 17 项设备测试全通过（PLR110 Android 16）；后台 89 项测试在远程 PostgreSQL (152.70.238.24) 上全通过**。

@@ -16,6 +16,7 @@ from cardcue_api.persistence.mail import (
     EmailAttachment,
 )
 from cardcue_api.persistence.drafts import StatementDraftModel
+from cardcue_api.persistence.transactions import DraftTransaction, ConfirmedTransaction, DetailSet, DetailSetTransaction
 
 __all__ = [
     "Base",
@@ -32,6 +33,10 @@ __all__ = [
     "EmailSource",
     "EmailAttachment",
     "StatementDraftModel",
+    "DraftTransaction",
+    "ConfirmedTransaction",
+    "DetailSet",
+    "DetailSetTransaction",
 ]
 
 from cardcue_api.admin import models as admin_models

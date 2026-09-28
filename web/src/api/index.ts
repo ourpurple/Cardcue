@@ -21,6 +21,8 @@ export const overviewApi = {
 // 3. Accounts & Cards API
 export const accountsApi = {
   listAccounts: () => apiClient.get('/admin/accounts'),
+  previewHistory: (id: string) => apiClient.get(`/admin/accounts/${id}/historical-ownership-preview`),
+  preflightHistory: (id: string, data: any) => apiClient.post(`/admin/accounts/${id}/historical-ownership-preflight`, data),
   createAccount: (data: any) => apiClient.post('/admin/accounts', data),
   updateAccount: (id: string, data: any) => apiClient.put(`/admin/accounts/${id}`, data),
   deleteAccount: (id: string) => apiClient.delete(`/admin/accounts/${id}`),
@@ -38,6 +40,8 @@ export const accountsApi = {
 export const statementsApi = {
   listStatements: (params?: any) => apiClient.get('/admin/statements', { params }),
   getStatement: (id: string) => apiClient.get(`/admin/statements/${id}`),
+  completeDetails: (id: string, data: any) => apiClient.post(`/admin/statements/${id}/details/complete`, data),
+  getDetailSet: (id: string, detailSetId: string) => apiClient.get(`/admin/statements/${id}/details/${detailSetId}`),
   correctStatement: (id: string, data: any) =>
     apiClient.post(`/admin/statements/${id}/correct`, data),
   recordPayment: (id: string, data: any) =>
