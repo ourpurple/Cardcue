@@ -365,7 +365,7 @@ private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: ()
                     modifier = Modifier.fillMaxWidth().testTag("home-due-${s.id}")
                 )
 
-                if (s.cardTails.contains("·")) {
+                if (bill.billingMode == "consolidated" || (s.isDemo && s.cardTails.contains("·"))) {
                     Text(
                         text = "多卡共用账单 · 金额仅统计一次",
                         color = Green,

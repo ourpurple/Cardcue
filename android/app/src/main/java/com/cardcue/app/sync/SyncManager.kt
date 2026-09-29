@@ -260,7 +260,11 @@ class SyncManager(
                 alias = it.alias,
                 reference = it.reference,
                 status = it.status,
-                updatedAt = it.updatedAt
+                updatedAt = it.updatedAt,
+                holder = it.holder,
+                billingMode = it.billingMode,
+                billingModeSource = it.billingModeSource,
+                revision = it.revision
             )
         }
         val cards = bootstrap.cards.map {
@@ -323,114 +327,14 @@ class SyncManager(
     }
 
     private suspend fun performIncrementalSync(url: String, token: String, startCursor: Long) {
-        _syncInfo.value = _syncInfo.value.copy(message = "正在拉取增量变更...")
-        var cursor = startCursor
-        var hasMore = true
-        while (hasMore) {
-            val res = apiClient.getChanges(url, token, cursor, limit = 100)
-            if (res.changes.isNotEmpty()) {
-                db.withTransaction {
-                    for (ch in res.changes) {
-                        applyChange(ch)
-                    }
-                    dao.setSyncMeta(SyncMeta(META_CURSOR, res.cursor.toString()))
-                }
-            }
-            cursor = res.cursor
-            hasMore = res.hasMore
-        }
-    }
-
-    private suspend fun applyChange(change: SyncChangeItemDto) {
-        val snapshot = change.snapshot
-        when (change.entityType) {
-            "account" -> {
-                if (change.action == "delete") {
-                    dao.deleteSyncedAccount(change.entityId)
-                } else if (snapshot != null) {
-                    dao.upsertSyncedAccounts(listOf(
-                        SyncedAccount(
-                            id = change.entityId,
-                            bank = snapshot["bank"]?.toString() ?: "",
-                            alias = snapshot["alias"]?.toString(),
-                            reference = snapshot["reference"]?.toString(),
-                            status = snapshot["status"]?.toString() ?: "active",
-                            updatedAt = snapshot["updated_at"]?.toString() ?: ""
-                        )
-                    ))
-                }
-            }
-            "card" -> {
-                if (change.action == "delete") {
-                    dao.deleteSyncedCard(change.entityId)
-                } else if (snapshot != null) {
-                    dao.upsertSyncedCards(listOf(
-                        SyncedCard(
-                            id = change.entityId,
-                            accountId = snapshot["account_id"]?.toString() ?: "",
-                            displayName = snapshot["display_name"]?.toString(),
-                            tail = snapshot["tail"]?.toString() ?: "",
-                            status = snapshot["status"]?.toString() ?: "active"
-                        )
-                    ))
-                }
-            }
-            "statement" -> {
-                if (change.action == "delete") {
-                    dao.deleteSyncedStatement(change.entityId)
-                } else if (snapshot != null) {
-                    dao.upsertSyncedStatements(listOf(
-                        SyncedStatement(
-                            id = change.entityId,
-                            accountId = snapshot["account_id"]?.toString() ?: "",
-                            currency = snapshot["currency"]?.toString() ?: "CNY",
-                            statementDate = snapshot["statement_date"]?.toString() ?: "",
-                            dueDate = snapshot["due_date"]?.toString() ?: "",
-                            currentVersionId = snapshot["current_version_id"]?.toString(),
-                            totalPaidMinor = (snapshot["total_paid_minor"] as? Number)?.toLong() ?: 0L,
-                            remainingMinor = (snapshot["remaining_minor"] as? Number)?.toLong() ?: 0L,
-                            updatedAt = snapshot["updated_at"]?.toString() ?: ""
-                        )
-                    ))
-                }
-            }
-            "statement_version" -> {
-                if (change.action == "delete") {
-                    dao.deleteSyncedStatementVersion(change.entityId)
-                } else if (snapshot != null) {
-                    dao.upsertSyncedStatementVersions(listOf(
-                        SyncedStatementVersion(
-                            id = change.entityId,
-                            statementId = snapshot["statement_id"]?.toString() ?: "",
-                            versionNumber = (snapshot["version_number"] as? Number)?.toInt() ?: 1,
-                            amountMinor = (snapshot["amount_minor"] as? Number)?.toLong() ?: 0L,
-                            minimumMinor = (snapshot["minimum_minor"] as? Number)?.toLong(),
-                            source = snapshot["source"]?.toString() ?: "manual",
-                            reason = snapshot["reason"]?.toString(),
-                            confirmedAt = snapshot["confirmed_at"]?.toString(),
-                            confirmedBy = snapshot["confirmed_by"]?.toString()
-                        )
-                    ))
-                }
-            }
-            "payment" -> {
-                if (change.action == "delete") {
-                    dao.deleteSyncedPayment(change.entityId)
-                } else if (snapshot != null) {
-                    dao.upsertSyncedPayments(listOf(
-                        SyncedPayment(
-                            id = change.entityId,
-                            statementId = snapshot["statement_id"]?.toString() ?: "",
-                            amountMinor = (snapshot["amount_minor"] as? Number)?.toLong() ?: 0L,
-                            currency = snapshot["currency"]?.toString() ?: "CNY",
-                            note = snapshot["note"]?.toString(),
-                            recordedAt = snapshot["recorded_at"]?.toString() ?: "",
-                            revokedAt = snapshot["revoked_at"]?.toString(),
-                            revokeReason = snapshot["revoke_reason"]?.toString()
-                        )
-                    ))
-                }
-            }
+        _syncInfo.value = _syncInfo.value.copy(message = "正在检查服务端变更...")
+        val changes = apiClient.getChanges(url, token, startCursor, limit = 100)
+        if (changes.changes.isNotEmpty()) {
+            // The backend change log records partial event snapshots, not a complete
+            // representation of statement balances, versions or account/card identity.
+            // Refresh all synced entities together instead of applying a partial event
+            // or advancing the cursor past data that was not fully loaded.
+            performBootstrap(url, token)
         }
     }
 

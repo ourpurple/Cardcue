@@ -1,4 +1,4 @@
-﻿package com.cardcue.app.sync
+package com.cardcue.app.sync
 
 import java.util.UUID
 
@@ -10,6 +10,10 @@ data class AccountDto(
     val status: String,
     val createdAt: String,
     val updatedAt: String,
+    val holder: String? = null,
+    val billingMode: String? = null,
+    val billingModeSource: String? = null,
+    val revision: Int = 1,
 )
 
 data class CardDto(
@@ -153,6 +157,7 @@ data class StatementDraftDto(
     val extractorName: String,
     val createdAt: String,
     val updatedAt: String,
+    val revision: Int = 1,
 )
 
 data class StatementDraftConfirmRequestDto(
@@ -163,6 +168,7 @@ data class StatementDraftConfirmRequestDto(
     val minimumMinor: Long? = null,
     val statementDate: String? = null,
     val dueDate: String? = null,
+    val expectedRevision: Int? = null,
 )
 
 data class StatementDraftConfirmResponseDto(

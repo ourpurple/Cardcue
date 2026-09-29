@@ -46,13 +46,16 @@ fun DraftReviewDialog(
     onConfirm: (StatementDraftConfirmRequestDto) -> Unit,
     onReject: (String) -> Unit,
 ) {
-    // 1. Account matching
-    val initialAccountId = remember(draft, accounts) {
-        draft.matchedAccountId?.takeIf { id -> accounts.any { it.id == id } }
-            ?: accounts.find { it.bank == draft.bank }?.id
-            ?: accounts.firstOrNull()?.id
+    // Model output, holder and card tails are clues, never account identity.
+    // Require an explicit tap for each draft; do not preselect a guessed account.
+    val availableAccounts = accounts.filter { it.status == "active" && it.billingMode in setOf("per_card", "consolidated") }
+    fun accountLabel(acct: SyncedAccount): String {
+        val cardDescription = if (acct.billingMode == "per_card") {
+            cards.filter { it.accountId == acct.id && it.status == "active" }.singleOrNull()?.let { " · ${it.displayName ?: "卡片"} 尾号${it.tail}" } ?: " · 卡片待核对"
+        } else ""
+        return "${acct.bank} · ${acct.holder ?: "持卡人待核对"} · ${acct.alias ?: "账户"}$cardDescription · ${if (acct.billingMode == "per_card") "独立还款" else "合并还款"}"
     }
-    var selectedAccountId by rememberSaveable(draft.id) { mutableStateOf(initialAccountId) }
+    var selectedAccountId by rememberSaveable(draft.id) { mutableStateOf<String?>(null) }
     var accountMenuExpanded by remember { mutableStateOf(false) }
 
     // 2. Editable fields
@@ -69,7 +72,7 @@ fun DraftReviewDialog(
         mutableStateOf(draft.dueDate ?: "")
     }
     var currencyText by rememberSaveable(draft.id) {
-        mutableStateOf(draft.currency ?: "CNY")
+        mutableStateOf(draft.currency ?: "")
     }
 
     // Validation
@@ -84,10 +87,13 @@ fun DraftReviewDialog(
     val parsedDueDate = runCatching { LocalDate.parse(dueDateText.trim()) }.getOrNull()
 
     val dateValid = parsedStmtDate != null && parsedDueDate != null && !parsedDueDate.isBefore(parsedStmtDate)
-    val minimumValid = parsedMinimum == null || (parsedAmount != null && parsedMinimum in 0L..parsedAmount)
-    val formValid = selectedAccountId != null && parsedAmount != null && dateValid && minimumValid
+    val minimumValid = minimumText.isBlank() || (parsedMinimum != null && parsedAmount != null && parsedMinimum in 0L..parsedAmount)
+    val validCurrency = supportedDraftCurrency(currencyText)
+    val selectedAccount = availableAccounts.find { it.id == selectedAccountId }
+    val activeAccountCards = cards.filter { it.accountId == selectedAccountId && it.status == "active" }
+    val accountValid = canConfirmDraftAccount(selectedAccount, cards, draft.cardTails)
+    val formValid = accountValid && parsedAmount != null && dateValid && minimumValid && validCurrency != null
 
-    val selectedAccount = accounts.find { it.id == selectedAccountId }
 
     Dialog(
         onDismissRequest = { if (!busy) onDismiss() },
@@ -188,7 +194,7 @@ fun DraftReviewDialog(
                         Spacer(Modifier.height(4.dp))
                         Box {
                             OutlinedCard(
-                                onClick = { if (accounts.isNotEmpty()) accountMenuExpanded = true },
+                                onClick = { if (availableAccounts.isNotEmpty()) accountMenuExpanded = true },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("draft-account-select"),
@@ -201,19 +207,19 @@ fun DraftReviewDialog(
                                     Column(Modifier.weight(1f)) {
                                         if (selectedAccount != null) {
                                             Text(
-                                                "${selectedAccount.bank} (${selectedAccount.alias})",
+                                                "${accountLabel(selectedAccount)}",
                                                 fontSize = 14.sp,
                                                 fontWeight = FontWeight.Medium
                                             )
                                         } else {
                                             Text(
-                                                if (accounts.isEmpty()) "暂无已同步账户 (请先在后台录入)" else "请选择对应信用卡账户",
+                                                if (availableAccounts.isEmpty()) "暂无有效且已确认还款模式的账户" else "请明确选择还款账户",
                                                 fontSize = 13.sp,
                                                 color = Red
                                             )
                                         }
                                     }
-                                    if (accounts.size > 1) {
+                                    if (availableAccounts.isNotEmpty()) {
                                         Icon(Icons.Outlined.ArrowDropDown, null, tint = Muted)
                                     }
                                 }
@@ -222,10 +228,10 @@ fun DraftReviewDialog(
                                 expanded = accountMenuExpanded,
                                 onDismissRequest = { accountMenuExpanded = false }
                             ) {
-                                accounts.forEach { acct ->
+                                availableAccounts.forEach { acct ->
                                     DropdownMenuItem(
                                         text = {
-                                            Text("${acct.bank} (${acct.alias})")
+                                            Text("${accountLabel(acct)}")
                                         },
                                         onClick = {
                                             selectedAccountId = acct.id
@@ -237,6 +243,10 @@ fun DraftReviewDialog(
                         }
                     }
 
+                    if (selectedAccount?.billingMode == "per_card" && !accountValid) {
+                        Text("独立还款须有唯一有效卡，且草稿不能包含多卡或冲突尾号；请在后台核对。", color = Red, fontSize = 11.sp)
+                    }
+                    Text("仅确认账单汇总；交易明细请到管理后台逐笔核对并保存。", color = Muted, fontSize = 11.sp)
                     // Card tail display if available
                     if (draft.cardTails.isNotEmpty()) {
                         Text(
@@ -246,6 +256,17 @@ fun DraftReviewDialog(
                             fontWeight = FontWeight.Medium
                         )
                     }
+
+                    OutlinedTextField(
+                        value = currencyText,
+                        onValueChange = { currencyText = it },
+                        label = { Text("币种代码") },
+                        placeholder = { Text("CNY 或 USD") },
+                        modifier = Modifier.fillMaxWidth().testTag("draft-currency-input"),
+                        singleLine = true,
+                        isError = currencyText.isNotBlank() && validCurrency == null,
+                        supportingText = { Text("必填；手机目前仅支持 CNY、USD，两位小数。其他币种请到管理后台核对。") }
+                    )
 
                     // Amounts
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -259,7 +280,7 @@ fun DraftReviewDialog(
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                             isError = parsedAmount == null && amountText.isNotEmpty(),
-                            supportingText = { Text("元，必填") }
+                            supportingText = { Text("所选币种主单位，必填") }
                         )
                         OutlinedTextField(
                             value = minimumText,
@@ -268,7 +289,7 @@ fun DraftReviewDialog(
                             modifier = Modifier.weight(1f),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            isError = parsedMinimum != null && parsedAmount != null && parsedMinimum > parsedAmount,
+                            isError = minimumText.isNotBlank() && !minimumValid,
                             supportingText = { Text("选填，无则留空") }
                         )
                     }
@@ -371,16 +392,16 @@ fun DraftReviewDialog(
                                     val amt = parsedAmount ?: return@Button
                                     val sDate = statementDateText.trim()
                                     val dDate = dueDateText.trim()
-                                    val card = cards.find { it.accountId == aid && draft.cardTails.contains(it.tail) }
                                     onConfirm(
                                         StatementDraftConfirmRequestDto(
                                             accountId = aid,
-                                            cardId = card?.id,
-                                            currency = currencyText.trim().ifBlank { "CNY" },
+                                            cardId = if (selectedAccount?.billingMode == "per_card") activeAccountCards.single().id else null,
+                                            currency = validCurrency ?: return@Button,
                                             amountMinor = amt,
                                             minimumMinor = parsedMinimum,
                                             statementDate = sDate,
-                                            dueDate = dDate
+                                            dueDate = dDate,
+                                            expectedRevision = draft.revision
                                         )
                                     )
                                 },

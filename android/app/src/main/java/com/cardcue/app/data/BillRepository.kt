@@ -10,7 +10,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.util.UUID
 
-data class Bill(val statement: Statement, val payments: List<Payment>, val cardHolder: String? = null) {
+data class Bill(val statement: Statement, val payments: List<Payment>, val cardHolder: String? = null, val billingMode: String? = null) {
     val activePayments: List<Payment> get() = payments.filter { it.voidedAt == null }
     val remaining: Long get() = BillingRules.remaining(statement.amountMinor, activePayments.map { it.amountMinor })
     val settled: Boolean get() = remaining == 0L
@@ -51,7 +51,7 @@ class BillRepository(
             val tails = if (acctCards.isNotEmpty()) {
                 acctCards.map { it.tail }.sorted().joinToString(" · ")
             } else {
-                account?.reference?.takeLast(4) ?: "----"
+                "暂无账户卡片"
             }
             val amountMinor = version?.amountMinor ?: (s.totalPaidMinor + s.remainingMinor)
             val minimumMinor = version?.minimumMinor ?: 0L
@@ -85,8 +85,7 @@ class BillRepository(
                 )
             }
 
-            val holder = Regex("""\((.*?)\)""").find(account?.alias ?: account?.bank ?: "")?.groupValues?.get(1)
-            Bill(statement, mappedPayments, holder)
+            Bill(statement, mappedPayments, account?.holder, account?.billingMode)
         }
     }
 

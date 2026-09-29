@@ -48,6 +48,10 @@ data class SyncedAccount(
     val reference: String?,
     val status: String,
     val updatedAt: String,
+    val holder: String? = null,
+    val billingMode: String? = null,
+    val billingModeSource: String? = null,
+    val revision: Int = 1,
 )
 
 @Entity(
@@ -198,13 +202,22 @@ interface CardCueDao {
         SyncedPayment::class,
         SyncMeta::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class CardCueDatabase : RoomDatabase() {
     abstract fun dao(): CardCueDao
 
     companion object {
+        // Preserve synced and demo rows; older account modes stay unknown until refreshed.
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `synced_accounts` ADD COLUMN `holder` TEXT")
+                db.execSQL("ALTER TABLE `synced_accounts` ADD COLUMN `billingMode` TEXT")
+                db.execSQL("ALTER TABLE `synced_accounts` ADD COLUMN `billingModeSource` TEXT")
+                db.execSQL("ALTER TABLE `synced_accounts` ADD COLUMN `revision` INTEGER NOT NULL DEFAULT 1")
+            }
+        }
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(

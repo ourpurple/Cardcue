@@ -95,7 +95,7 @@ class RepositoryTest {
         v1Helper.close()
 
         val upgradedDb = Room.databaseBuilder(context, CardCueDatabase::class.java, dbName)
-            .addMigrations(CardCueDatabase.MIGRATION_1_2)
+            .addMigrations(CardCueDatabase.MIGRATION_1_2, CardCueDatabase.MIGRATION_2_3)
             .build()
         try {
             val dao = upgradedDb.dao()
@@ -126,6 +126,45 @@ class RepositoryTest {
         }
     }
 
+    @Test fun migrationFrom2To3PreservesCachedAndDemoRows() = runBlocking {
+        val dbName = "v2-migration-${System.nanoTime()}.db"
+        val config = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(dbName)
+            .callback(object : SupportSQLiteOpenHelper.Callback(2) {
+                override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                    db.execSQL("CREATE TABLE `statements` (`id` TEXT NOT NULL, `accountKey` TEXT NOT NULL, `bank` TEXT NOT NULL, `bankMark` TEXT NOT NULL, `color` INTEGER NOT NULL, `cardTails` TEXT NOT NULL, `cycle` TEXT NOT NULL, `currency` TEXT NOT NULL, `amountMinor` INTEGER NOT NULL, `minimumMinor` INTEGER NOT NULL, `statementDate` TEXT NOT NULL, `dueDate` TEXT NOT NULL, `source` TEXT NOT NULL, `isDemo` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+                    db.execSQL("CREATE UNIQUE INDEX `index_statements_accountKey_cycle_currency` ON `statements` (`accountKey`, `cycle`, `currency`)")
+                    db.execSQL("CREATE TABLE `payments` (`id` TEXT NOT NULL, `statementId` TEXT NOT NULL, `amountMinor` INTEGER NOT NULL, `recordedAt` INTEGER NOT NULL, `note` TEXT NOT NULL, `voidedAt` INTEGER, PRIMARY KEY(`id`), FOREIGN KEY(`statementId`) REFERENCES `statements`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT )")
+                    db.execSQL("CREATE INDEX `index_payments_statementId` ON `payments` (`statementId`)")
+                    db.execSQL("CREATE TABLE `app_meta` (`key` TEXT NOT NULL, `value` TEXT NOT NULL, PRIMARY KEY(`key`))")
+                    CardCueDatabase.MIGRATION_1_2.migrate(db)
+                }
+                override fun onUpgrade(db: androidx.sqlite.db.SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+            }).build()
+        val helper = FrameworkSQLiteOpenHelperFactory().create(config)
+        helper.writableDatabase.apply {
+            execSQL("INSERT INTO statements VALUES ('demo-keep','demo-key','测试银行','测',0,'1234','2026-09','CNY',2300,200,'2026-09-01','2026-09-30','演示',1)")
+            execSQL("INSERT INTO synced_accounts VALUES ('account-keep','测试银行','测试账户',NULL,'active','2026-09-28')")
+            execSQL("INSERT INTO synced_cards VALUES ('card-keep','account-keep','主卡','5678','active')")
+            execSQL("INSERT INTO synced_statements VALUES ('bill-keep','account-keep','CNY','2026-09-01','2026-09-30',NULL,0,2300,'2026-09-28')")
+            execSQL("INSERT INTO sync_meta VALUES ('cursor','42')")
+            close()
+        }
+        helper.close()
+        val upgraded = Room.databaseBuilder(context, CardCueDatabase::class.java, dbName)
+            .addMigrations(CardCueDatabase.MIGRATION_2_3).build()
+        try {
+            val dao = upgraded.dao()
+            assertEquals(2300L, dao.statement("demo-keep")!!.amountMinor)
+            assertEquals("测试账户", dao.getSyncedAccounts().single().alias)
+            assertNull(dao.getSyncedAccounts().single().billingMode)
+            assertNull(dao.getSyncedAccounts().single().holder)
+            assertEquals(1, dao.getSyncedAccounts().single().revision)
+            assertEquals("42", dao.syncMeta("cursor"))
+            assertEquals(1, dao.observeSyncedCards().first().size)
+            assertEquals(1, dao.observeSyncedStatements().first().size)
+        } finally { upgraded.close(); context.deleteDatabase(dbName) }
+    }
     @Test fun syncedBillsMappingAndReactiveFlow() = runBlocking {
         val db = Room.inMemoryDatabaseBuilder(context, CardCueDatabase::class.java).build()
         try {
@@ -139,7 +178,9 @@ class RepositoryTest {
                     alias = "招行经典白",
                     reference = "REF12345678",
                     status = "active",
-                    updatedAt = "2026-09-18T10:00:00"
+                    updatedAt = "2026-09-18T10:00:00",
+                    holder = "测试持卡人",
+                    billingMode = "consolidated"
                 )
             ))
             dao.upsertSyncedCards(listOf(
@@ -194,6 +235,8 @@ class RepositoryTest {
             assertEquals("招", bill.statement.bankMark)
             assertEquals(0xFFC25259.toLong(), bill.statement.color)
             assertEquals("1122 · 8899", bill.statement.cardTails)
+            assertEquals("测试持卡人", bill.cardHolder)
+            assertEquals("consolidated", bill.billingMode)
             assertEquals(500000L, bill.statement.amountMinor)
             assertEquals(400000L, bill.remaining)
             assertFalse(bill.settled)
@@ -204,6 +247,36 @@ class RepositoryTest {
         } finally { db.close() }
     }
 
+    @Test fun perCardAccountsRemainSeparateEvenWithSameHolderAndTail() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, CardCueDatabase::class.java).build()
+        try {
+            val dao = db.dao()
+            val repository = BillRepository(db)
+            val accountIds = listOf("account-a", "account-b")
+            dao.upsertSyncedAccounts(accountIds.map { id ->
+                SyncedAccount(id, "建设银行", id, null, "active", "2026-09-28",
+                    holder = "同一持卡人", billingMode = "per_card")
+            })
+            dao.upsertSyncedCards(accountIds.mapIndexed { index, id ->
+                SyncedCard("card-$index", id, "信用卡", "1234", "active")
+            })
+            dao.upsertSyncedStatementVersions(accountIds.mapIndexed { index, _ ->
+                SyncedStatementVersion("version-$index", "statement-$index", 1,
+                    (index + 1) * 10000L, null, "email", null, null, null)
+            })
+            dao.upsertSyncedStatements(accountIds.mapIndexed { index, id ->
+                SyncedStatement("statement-$index", id, "CNY", "2026-09-01",
+                    "2026-09-30", "version-$index", 0L, (index + 1) * 10000L, "2026-09-28")
+            })
+            dao.setSyncMeta(SyncMeta("sync_cursor", "17"))
+
+            val bills = repository.bills.first()
+            assertEquals(2, bills.size)
+            assertEquals(setOf("account-a", "account-b"), bills.map { it.statement.accountKey }.toSet())
+            assertEquals(30000L, bills.sumOf { it.remaining })
+            assertTrue(bills.all { it.billingMode == "per_card" && it.cardHolder == "同一持卡人" })
+        } finally { db.close() }
+    }
     @Test fun offlinePaymentThrowsExceptionAndDoesNotMutate() = runBlocking {
         val db = Room.inMemoryDatabaseBuilder(context, CardCueDatabase::class.java).build()
         try {

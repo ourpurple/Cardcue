@@ -47,14 +47,14 @@ fun DetailScreen(bill: Bill, today: LocalDate, busy: Boolean, modifier: Modifier
             }
             item {
                 SectionCard("账单信息") {
-                    InfoRow("关联卡片", s.cardTails)
+                    InfoRow(if (s.isDemo) "关联卡片" else "账户卡片（含历史）", s.cardTails)
                     InfoRow("本期应还", Money.display(s.amountMinor, s.currency))
                     InfoRow("最低还款额", Money.display(s.minimumMinor, s.currency))
                     InfoRow("已记录还款", Money.display(s.amountMinor - bill.remaining, s.currency))
                     InfoRow("账单日期", s.statementDate)
                     InfoRow("到期还款日", s.dueDate)
                     InfoRow("数据来源", s.source)
-                    if (s.cardTails.contains("·")) Text("此账户的多张卡共用一份账单，应还金额只统计一次。", fontSize = 12.sp, color = Green, lineHeight = 19.sp, modifier = Modifier.padding(top = 10.dp))
+                    if (bill.billingMode == "consolidated" || (s.isDemo && s.cardTails.contains("·"))) Text("此账户的多张卡共用一份账单，应还金额只统计一次。", fontSize = 12.sp, color = Green, lineHeight = 19.sp, modifier = Modifier.padding(top = 10.dp))
                 }
             }
             item { Text("还款记录", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp)) }
@@ -62,7 +62,7 @@ fun DetailScreen(bill: Bill, today: LocalDate, busy: Boolean, modifier: Modifier
                 Text("还没有记录。完成银行还款后，可以在这里记一笔。", fontSize = 13.sp, color = Muted, lineHeight = 21.sp)
             }
             items(bill.payments, key = { it.id }) { payment -> PaymentRow(payment, s.currency, busy, onVoid = { voidId = payment.id }) }
-            item { Text("当前账单为演示数据。手动记录不会获取银行实时还款状态。", fontSize = 11.sp, color = Muted, lineHeight = 18.sp) }
+            item { Text(if (s.isDemo) "当前账单为演示数据。手动记录不会获取银行实时还款状态。" else "还款记录由后台保存，不代表银行转账；请以银行实际到账情况为准。", fontSize = 11.sp, color = Muted, lineHeight = 18.sp) }
         }
     }
     if (voidId != null) AlertDialog(

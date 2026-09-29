@@ -10,7 +10,7 @@ import com.cardcue.app.sync.SyncManager
 open class CardCueApplication : Application() {
     open val database: CardCueDatabase by lazy {
         Room.databaseBuilder(this, CardCueDatabase::class.java, "cardcue.db")
-            .addMigrations(CardCueDatabase.MIGRATION_1_2)
+            .addMigrations(CardCueDatabase.MIGRATION_1_2, CardCueDatabase.MIGRATION_2_3)
             .build()
     }
     open val syncManager: SyncManager by lazy {

@@ -261,6 +261,7 @@ class SyncApiClient(private val timeoutMs: Int = 15_000) {
             if (req.minimumMinor != null) put("minimum_minor", req.minimumMinor)
             if (req.statementDate != null) put("statement_date", req.statementDate)
             if (req.dueDate != null) put("due_date", req.dueDate)
+            if (req.expectedRevision != null) put("expected_revision", req.expectedRevision)
         }
         val (code, body) = executeRequest(
             urlStr = "$baseUrl/v1/drafts/$draftId/confirm",
@@ -357,7 +358,11 @@ class SyncApiClient(private val timeoutMs: Int = 15_000) {
                     reference = if (a.isNull("reference")) null else a.getString("reference"),
                     status = a.optString("status", "active"),
                     createdAt = a.optString("created_at", ""),
-                    updatedAt = a.optString("updated_at", "")
+                    updatedAt = a.optString("updated_at", ""),
+                    holder = a.optString("holder").takeIf { !a.isNull("holder") },
+                    billingMode = a.optString("billing_mode").takeIf { !a.isNull("billing_mode") },
+                    billingModeSource = a.optString("billing_mode_source").takeIf { !a.isNull("billing_mode_source") },
+                    revision = a.optInt("revision", 1)
                 )
             )
         }
@@ -535,7 +540,8 @@ class SyncApiClient(private val timeoutMs: Int = 15_000) {
             rejectionReason = if (d.isNull("rejection_reason")) null else d.getString("rejection_reason"),
             extractorName = d.optString("extractor_name", ""),
             createdAt = d.optString("created_at", ""),
-            updatedAt = d.optString("updated_at", "")
+            updatedAt = d.optString("updated_at", ""),
+            revision = d.optInt("revision", 1)
         )
     }
 }
