@@ -1,18 +1,88 @@
+# IDE and machine-local settings
 .idea/
+.vscode/
+*.iml
+local.properties
+.DS_Store
+Thumbs.db
+
+# Android / Gradle caches and generated outputs
 .gradle/
 .gradle-tools/
 .gradle-user-home/
 .kotlin/
 **/build/
-local.properties
-*.iml
-__pycache__/
-.pytest_cache/
+*.apk
+*.aab
+*.hprof
+
+# Frontend dependencies and generated outputs
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Python environments, bytecode and package metadata
 .venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Test / analysis results (keep test source files)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+test-results/
+playwright-report/
+
+# Disposable logs and temporary files
+*.log
+logs/
+.tmp/
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Local configuration and secrets; keep shareable example templates
 .env
+.env.*
+!.env.example
+!.env.*.example
+*.keystore
+*.jks
+*.pem
+*.key
+*.p12
+*.pfx
+keystore.properties
+signing.properties
+
+# Runtime databases, backups and private mail / bill samples
+/backend/data/
+backups/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 *.eml
 *.mbox
 private-samples/
-*.keystore
-*.jks
 temp_emails/
+
+# Personal one-off scripts containing database credentials / bill data
+/scripts/clean-db.py
+/scripts/populate_official_bills.py
+/scripts/sync-bills.py

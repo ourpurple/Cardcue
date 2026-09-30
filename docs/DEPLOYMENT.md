@@ -36,8 +36,8 @@ nano backend/.env
 
 `backend/.env` 示例内容：
 ```env
-DATABASE_URL=postgresql+asyncpg://cardcube:TPAdhfnyLmLptJxx@152.70.238.24:5432/cardcube
-DATABASE_SYNC_URL=postgresql+psycopg2://cardcube:TPAdhfnyLmLptJxx@152.70.238.24:5432/cardcube
+DATABASE_URL=postgresql+asyncpg://cardcube:CHANGE_ME@152.70.238.24:5432/cardcube
+DATABASE_SYNC_URL=postgresql+psycopg2://cardcube:CHANGE_ME@152.70.238.24:5432/cardcube
 MAIL_ENCRYPTION_KEY=cardcue-secret-key-32-bytes-long!
 MAIL_STORAGE_DIR=/app/data/mail_storage
 MAIL_CHECK_INTERVAL_MINUTES=30
