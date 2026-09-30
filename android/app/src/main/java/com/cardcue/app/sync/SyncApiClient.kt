@@ -12,9 +12,9 @@ class CursorOutOfRangeException(message: String) : Exception(message)
 class SyncAuthException(message: String) : Exception(message)
 class SyncApiException(val statusCode: Int, message: String) : Exception(message)
 
-class SyncApiClient(private val timeoutMs: Int = 15_000) {
+open class SyncApiClient(private val timeoutMs: Int = 15_000) {
 
-    fun checkHealth(baseUrl: String): Boolean {
+    open fun checkHealth(baseUrl: String): Boolean {
         return try {
             val url = URL("$baseUrl/health")
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -75,7 +75,7 @@ class SyncApiClient(private val timeoutMs: Int = 15_000) {
         )
     }
 
-    fun getBootstrap(baseUrl: String, token: String): SyncBootstrapResponse {
+    open fun getBootstrap(baseUrl: String, token: String): SyncBootstrapResponse {
         val (code, body) = executeRequest(
             urlStr = "$baseUrl/v1/sync/bootstrap",
             method = "GET",
@@ -88,7 +88,7 @@ class SyncApiClient(private val timeoutMs: Int = 15_000) {
         return parseBootstrapResponse(json)
     }
 
-    fun getChanges(baseUrl: String, token: String, cursor: Long, limit: Int = 100): SyncChangesResponse {
+    open fun getChanges(baseUrl: String, token: String, cursor: Long, limit: Int = 100): SyncChangesResponse {
         val (code, body) = executeRequest(
             urlStr = "$baseUrl/v1/sync/changes?cursor=$cursor&limit=$limit",
             method = "GET",

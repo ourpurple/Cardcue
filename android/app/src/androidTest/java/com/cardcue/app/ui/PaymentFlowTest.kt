@@ -118,6 +118,7 @@ class PaymentFlowTest {
         compose.onNodeWithContentDescription("返回").performClick()
         compose.onNodeWithTag("history-filter-2").assertIsSelected()
         compose.onNodeWithTag("history-filter-1").performClick()
+        compose.onNodeWithTag("history-filter-1").assertIsSelected()
         compose.waitUntil(15_000) {
             compose.onAllNodesWithTag("history-bill-demo-old-bcm").fetchSemanticsNodes().isEmpty()
         }

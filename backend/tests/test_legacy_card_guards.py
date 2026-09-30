@@ -37,7 +37,7 @@ class GuardSession:
         raise AssertionError('guard should not delete')
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 @pytest.mark.parametrize('history,draft', [(True, False), (False, True)])
 async def test_delete_card_with_evidence_requires_archive(history, draft):
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4())
@@ -47,7 +47,7 @@ async def test_delete_card_with_evidence_requires_archive(history, draft):
     assert exc.value.status_code == 409
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 @pytest.mark.parametrize('history,draft', [(True, False), (False, True)])
 async def test_split_card_with_history_or_draft_requires_review(history, draft):
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4(), status='active')
@@ -58,7 +58,7 @@ async def test_split_card_with_history_or_draft_requires_review(history, draft):
     assert exc.value.status_code == 409
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_unknown_mode_cannot_use_legacy_split():
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4(), status='active')
     account = R(id=card.account_id, status='active', billing_mode=None, cards=[card, R(status='active')])
@@ -67,7 +67,7 @@ async def test_unknown_mode_cannot_use_legacy_split():
     assert exc.value.status_code == 409
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_delete_account_with_matched_draft_preserves_evidence():
     account = R(id=uuid.uuid4())
     session = GuardSession([account, 0, (uuid.uuid4(),)])
@@ -79,7 +79,7 @@ async def test_delete_account_with_matched_draft_preserves_evidence():
     assert 'matched_card_id' in session.queries[-1]
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 @pytest.mark.parametrize('change', [
     {'bank': '另一个银行'}, {'holder': '另一持卡人'}, {'reference': '另一个账号'},
     {'billing_mode': 'consolidated'},
@@ -97,7 +97,7 @@ async def test_account_identity_and_mode_change_require_ownership_review(change,
     assert acct.bank == '建行'
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_reactivating_second_per_card_card_rejected():
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4(), revision=2,
              tail='1234', status='archived', display_name='合成卡')
@@ -110,7 +110,7 @@ async def test_reactivating_second_per_card_card_rejected():
     assert card.revision == 2
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 @pytest.mark.parametrize('evidence', ['statement', 'draft'])
 async def test_tail_change_with_evidence_rejected(evidence):
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4(), revision=1,
@@ -123,7 +123,7 @@ async def test_tail_change_with_evidence_rejected(evidence):
     assert card.tail == '1234'
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_split_archived_card_does_not_create_active_account():
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4(), status='archived')
     account = R(id=card.account_id, status='active', billing_mode='per_card',
@@ -133,7 +133,7 @@ async def test_split_archived_card_does_not_create_active_account():
     assert exc.value.status_code == 409
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_delete_card_with_account_matched_draft_rejected():
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4())
     with pytest.raises(HTTPException) as exc:
@@ -141,7 +141,7 @@ async def test_delete_card_with_account_matched_draft_rejected():
     assert exc.value.status_code == 409
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_single_card_reactivation_still_allowed(monkeypatch):
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4(), revision=1,
              tail='1234', status='archived', display_name='old')
@@ -160,7 +160,7 @@ async def test_single_card_reactivation_still_allowed(monkeypatch):
     assert card.display_name == 'new'
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_noop_tail_edit_does_not_require_history_review(monkeypatch):
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4(), revision=1,
              tail='1234', status='active', display_name='old')
@@ -176,7 +176,7 @@ async def test_noop_tail_edit_does_not_require_history_review(monkeypatch):
     assert len(session.queries) == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_safe_legacy_split_advances_membership_revisions(monkeypatch):
     card = R(id=uuid.uuid4(), account_id=uuid.uuid4(), revision=3,
              status='active', tail='1234')
@@ -202,7 +202,7 @@ async def test_safe_legacy_split_advances_membership_revisions(monkeypatch):
     assert account.revision == 3
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_create_card_checks_account_under_lock_before_active_count():
     from cardcue_api.services.billing import BillingService, ConflictError
     from cardcue_api.domain.schemas import CardCreate

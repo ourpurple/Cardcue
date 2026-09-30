@@ -147,7 +147,7 @@ class RepositoryTest {
             execSQL("INSERT INTO synced_accounts VALUES ('account-keep','测试银行','测试账户',NULL,'active','2026-09-28')")
             execSQL("INSERT INTO synced_cards VALUES ('card-keep','account-keep','主卡','5678','active')")
             execSQL("INSERT INTO synced_statements VALUES ('bill-keep','account-keep','CNY','2026-09-01','2026-09-30',NULL,0,2300,'2026-09-28')")
-            execSQL("INSERT INTO sync_meta VALUES ('cursor','42')")
+            execSQL("INSERT INTO sync_meta VALUES ('sync_cursor','42')")
             close()
         }
         helper.close()
@@ -160,7 +160,8 @@ class RepositoryTest {
             assertNull(dao.getSyncedAccounts().single().billingMode)
             assertNull(dao.getSyncedAccounts().single().holder)
             assertEquals(1, dao.getSyncedAccounts().single().revision)
-            assertEquals("42", dao.syncMeta("cursor"))
+            assertEquals("42", dao.syncMeta("sync_cursor"))
+            assertNull(dao.syncMeta(SyncManager.META_CACHE_PROTOCOL))
             assertEquals(1, dao.observeSyncedCards().first().size)
             assertEquals(1, dao.observeSyncedStatements().first().size)
         } finally { upgraded.close(); context.deleteDatabase(dbName) }

@@ -361,7 +361,7 @@ private fun BillCard(bill: Bill, today: LocalDate, onOpen: () -> Unit, onPay: ()
                     text = "账单日 ${s.statementDate} · 还款日 ${s.dueDate}",
                     color = if (bill.settled) Green else if (urgent) Red else Muted,
                     fontSize = 12.sp,
-                    maxLines = 1,
+                    maxLines = 2,
                     modifier = Modifier.fillMaxWidth().testTag("home-due-${s.id}")
                 )
 

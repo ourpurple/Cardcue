@@ -65,7 +65,7 @@ def test_consolidated_bill_preserves_single_account_and_revoked_payment_count():
     assert result['statements'][0]['proposed_account_id'] is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_reader_does_not_write_or_commit():
     account, cards, stmt, version, payment, tx, draft = sample()
 

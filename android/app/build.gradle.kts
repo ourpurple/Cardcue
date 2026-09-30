@@ -16,7 +16,15 @@ android {
         versionName = "0.2.0"
         testInstrumentationRunner = "com.cardcue.app.testing.CardCueTestRunner"
     }
-    buildTypes { release { isMinifyEnabled = false } }
+    buildTypes {
+        getByName("debug") {
+            // Connected tests must coexist with an installed app signed by another key.
+            if (providers.gradleProperty("cardcue.isolatedDeviceTest").orNull == "true") {
+                applicationIdSuffix = ".device.test"
+            }
+        }
+        getByName("release") { isMinifyEnabled = false }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

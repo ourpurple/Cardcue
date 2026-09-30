@@ -1,0 +1,18 @@
+# Disposable, local-only PostgreSQL for V2 migration/integration verification.
+# Never point migration tests at the production docker-compose service.
+services:
+  cardcue-v2-test-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: cardcue_v2_test
+      POSTGRES_USER: cardcue_v2_test
+      POSTGRES_PASSWORD: local-only-test-password
+    ports:
+      - "127.0.0.1:55439:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cardcue_v2_test -d cardcue_v2_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 20

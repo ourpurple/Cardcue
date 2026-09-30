@@ -114,7 +114,7 @@ def request(session, **overrides):
     return DetailCompletion(**params)
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_complete_details_creates_snapshot_without_new_debt(monkeypatch):
     session = Session()
     async def audit(*args):
@@ -141,7 +141,7 @@ async def test_complete_details_creates_snapshot_without_new_debt(monkeypatch):
     assert session.commits == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_append_copies_previous_snapshot_and_keeps_partial(monkeypatch):
     old = Row(id=uuid.uuid4(), revision=1, detail_status="partial",
               recognized_transaction_count=1, confirmed_transaction_count=1, flagged_transaction_count=0)
@@ -166,7 +166,7 @@ async def test_append_copies_previous_snapshot_and_keeps_partial(monkeypatch):
     assert old.revision == 1  # old metadata and rows are never modified
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_stale_detail_revision_does_not_write():
     session = Session()
     with pytest.raises(HTTPException) as exc:
@@ -178,7 +178,7 @@ async def test_stale_detail_revision_does_not_write():
     assert not session.added and not session.commits
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_duplicate_selection_does_not_write():
     session = Session()
     with pytest.raises(HTTPException) as exc:
@@ -191,7 +191,7 @@ async def test_duplicate_selection_does_not_write():
     assert not session.added
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_idempotent_replay_does_not_lock_or_write():
     session = Session()
     data = request(session)
@@ -203,7 +203,7 @@ async def test_idempotent_replay_does_not_lock_or_write():
     assert not session.queries and not session.added
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_complete_requires_full_source_proof():
     session = Session()
     session.draft.source_manifest = {"entries": [{"truncated": True}]}
@@ -218,7 +218,7 @@ async def test_complete_requires_full_source_proof():
     assert not session.added and not session.commits
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_same_email_source_cannot_be_appended_as_duplicate():
     old_row = Row(id=uuid.uuid4(), sequence=1, transaction_date=None, posting_date=None,
                   description="old", amount_minor=2000, currency="CNY", card_tail="1234",
@@ -234,7 +234,7 @@ async def test_same_email_source_cannot_be_appended_as_duplicate():
     assert not session.added and not session.commits
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_reused_id_with_changed_payload_is_conflict():
     session = Session()
     first = request(session)
@@ -248,7 +248,7 @@ async def test_reused_id_with_changed_payload_is_conflict():
     assert not session.queries and not session.added
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 @pytest.mark.parametrize("missing_side", ["existing_line", "new_draft", "old_email_lookup", "missing_old_email"])
 async def test_append_without_verifiable_provenance_requires_explicit_replace(missing_side):
     old_row = Row(id=uuid.uuid4(), sequence=1, transaction_date=None, posting_date=None,
@@ -273,7 +273,7 @@ async def test_append_without_verifiable_provenance_requires_explicit_replace(mi
     assert not session.added and not session.commits
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_explicit_replacement_of_untraceable_legacy_rows_retains_old_rows(monkeypatch):
     old_row = Row(id=uuid.uuid4(), sequence=1, transaction_date=None, posting_date=None,
                   description="old", amount_minor=2000, currency="CNY", card_tail="1234",

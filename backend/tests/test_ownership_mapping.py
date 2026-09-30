@@ -86,7 +86,7 @@ def test_invalid_input_is_rejected_before_preflight():
                  target_account_id=account.id, target_account_revision=3, extra='untrusted')
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_stale_source_revision_rejected_without_issuing_mapping_queries(monkeypatch):
     preview, account, card, decision = fixtures()
     async def mock_preview(session, account_id):

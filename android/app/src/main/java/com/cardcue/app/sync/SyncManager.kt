@@ -45,6 +45,9 @@ class SyncManager(
         const val META_DEVICE_ID = "sync_device_id"
         const val META_DEVICE_NAME = "sync_device_name"
         const val META_CURSOR = "sync_cursor"
+        // A server cursor does not describe cached row shape. Bump after schema changes.
+        const val META_CACHE_PROTOCOL = "sync_cache_protocol"
+        const val CACHE_PROTOCOL = "2"
         const val META_LAST_SYNC_TIME = "sync_last_time"
     }
 
@@ -109,6 +112,7 @@ class SyncManager(
                 dao.setSyncMeta(SyncMeta(META_DEVICE_ID, pairRes.deviceId))
                 dao.setSyncMeta(SyncMeta(META_DEVICE_NAME, devName))
                 dao.deleteSyncMeta(META_CURSOR)
+                dao.deleteSyncMeta(META_CACHE_PROTOCOL)
             }
 
             _syncInfo.value = _syncInfo.value.copy(
@@ -150,6 +154,7 @@ class SyncManager(
                 dao.deleteSyncMeta(META_DEVICE_ID)
                 dao.deleteSyncMeta(META_DEVICE_NAME)
                 dao.deleteSyncMeta(META_CURSOR)
+                dao.deleteSyncMeta(META_CACHE_PROTOCOL)
                 dao.deleteSyncMeta(META_LAST_SYNC_TIME)
                 dao.clearAllSyncedData()
             }
@@ -203,9 +208,10 @@ class SyncManager(
             val activeToken = requireNotNull(token)
             val currentCursorStr = dao.syncMeta(META_CURSOR)
             val currentCursor = currentCursorStr?.toLongOrNull() ?: 0L
+            val cacheProtocol = dao.syncMeta(META_CACHE_PROTOCOL)
 
             try {
-                if (forceBootstrap || currentCursor == 0L) {
+                if (forceBootstrap || currentCursor == 0L || cacheProtocol != CACHE_PROTOCOL) {
                     performBootstrap(currentServerUrl, activeToken)
                 } else {
                     try {
@@ -323,6 +329,8 @@ class SyncManager(
             dao.upsertSyncedStatementVersions(versions)
             dao.upsertSyncedPayments(payments)
             dao.setSyncMeta(SyncMeta(META_CURSOR, bootstrap.cursor.toString()))
+            // Marker and authoritative rows activate atomically; failure preserves retry.
+            dao.setSyncMeta(SyncMeta(META_CACHE_PROTOCOL, CACHE_PROTOCOL))
         }
     }
 

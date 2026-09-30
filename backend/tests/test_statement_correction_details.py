@@ -79,7 +79,7 @@ def make_case(status='complete', transaction_count=1):
     return Session(stmt, version, original)
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 @pytest.mark.parametrize('new_amount,expected_status', [(1000, 'complete'), (1100, 'partial')])
 async def test_correction_preserves_rows_without_claiming_changed_total_complete(
     monkeypatch, new_amount, expected_status,
@@ -120,7 +120,7 @@ async def test_correction_preserves_rows_without_claiming_changed_total_complete
     assert session.committed
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_legacy_version_without_rows_never_becomes_complete(monkeypatch):
     session = make_case(transaction_count=0)
     async def paid(*args):
@@ -139,7 +139,7 @@ async def test_legacy_version_without_rows_never_becomes_complete(monkeypatch):
     assert not any(isinstance(value, ConfirmedTransaction) for value in session.added)
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_stale_correction_cannot_copy_details_or_write():
     session = make_case()
     with pytest.raises(HTTPException) as exc:
@@ -153,7 +153,7 @@ async def test_stale_correction_cannot_copy_details_or_write():
     assert not session.committed
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_legacy_rows_without_coverage_are_not_labeled_none(monkeypatch):
     session = make_case(status='none')
     async def no_op(*args, **kwargs):
@@ -172,7 +172,7 @@ async def test_legacy_rows_without_coverage_are_not_labeled_none(monkeypatch):
     assert result['detail_status'] == 'partial'
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="function")
 async def test_correction_carries_latest_detail_snapshot_not_stale_legacy_rows(monkeypatch):
     session = make_case(status='none')
     session.detail_set = Row(id=uuid.uuid4(), revision=2, detail_status='complete',

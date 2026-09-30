@@ -56,6 +56,7 @@ if ($UseMirror) {
 $gradleOptions = @('--console=plain')
 # A daemon started in a restricted session can retain its network restrictions.
 if ($NoDaemon) { $gradleOptions += '--no-daemon' }
+if ($DeviceTests) { $gradleOptions += '-Pcardcue.isolatedDeviceTest=true' }
 Push-Location $androidProject
 try {
     & $gradleExe testDebugUnitTest lintDebug assembleDebug @gradleOptions
@@ -64,6 +65,7 @@ try {
         & $gradleExe connectedDebugAndroidTest @gradleOptions
         if ($LASTEXITCODE -ne 0) { throw 'Device tests failed.' }
     }
+    if ($DeviceTests) { Write-Host 'This run built an isolated test package; do not distribute its APK as the daily app.' }
     Write-Host "APK: $(Join-Path $androidProject 'app\build\outputs\apk\debug\app-debug.apk')"
 } finally { Pop-Location }
 
