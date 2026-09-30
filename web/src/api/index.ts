@@ -1,4 +1,5 @@
 import { apiClient } from './client';
+import type { DeviceItem } from '../types';
 
 // 1. Auth API
 export const authApi = {
@@ -127,7 +128,8 @@ export const jobsApi = {
 
 // 10. Devices, Audit & Status API
 export const systemApi = {
-  listDevices: () => apiClient.get('/admin/devices'),
+  listDevices: () => apiClient.get<DeviceItem[]>('/admin/devices'),
+  clearRevokedDevices: () => apiClient.post<{ deleted_count: number }>('/admin/devices/clear-revoked'),
   revokeDevice: (id: string) => apiClient.post(`/admin/devices/${id}/revoke`),
   listAudit: (params?: any) => apiClient.get('/admin/audit', { params }),
   getStatus: () => apiClient.get('/admin/status'),

@@ -23,7 +23,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -77,6 +77,8 @@ from cardcue_api.persistence import (
     DetailSetTransaction,
     StatementVersion,
 )
+from cardcue_api.api.devices import DeviceOut
+from cardcue_api.persistence.device import Device
 from cardcue_api.persistence.database import get_session
 from cardcue_api.services.auth import DeviceService
 from cardcue_api.services.billing import BillingService, ConflictError, NotFoundError
@@ -2033,12 +2035,30 @@ async def clear_drafts(
 # 6. Devices Management
 # ---------------------------------------------------------------------------
 
-@router.get("/devices")
+@router.get("/devices", response_model=list[DeviceOut])
 async def list_admin_devices(session: AsyncSession = Depends(get_session)):
     return await device_svc.list_devices(session)
 
 
-@router.post("/devices/{device_id}/revoke")
+@router.post("/devices/clear-revoked")
+async def clear_revoked_devices(
+    actor=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    # Match revoked authorization, not every non-active/unknown status. A single
+    # conditional DELETE prevents a stale browser list from deleting active rows.
+    result = await session.execute(
+        delete(Device)
+        .where(or_(Device.status == "revoked", Device.revoked_at.is_not(None)))
+        .returning(Device.id)
+    )
+    deleted_count = len(result.scalars().all())
+    await audit(session, actor, "revoked_devices_cleared", None, {"deleted_count": deleted_count})
+    await session.commit()
+    return {"deleted_count": deleted_count}
+
+
+@router.post("/devices/{device_id}/revoke", response_model=DeviceOut)
 async def revoke_admin_device(
     device_id: uuid.UUID,
     actor=Depends(recent_admin),

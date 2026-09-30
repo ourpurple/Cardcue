@@ -381,11 +381,11 @@ export interface AdminJobItem {
 
 export interface DeviceItem {
   id: string;
-  device_name: string;
-  device_model: string;
-  last_sync_at: string | null;
-  is_active: boolean;
-  created_at: string;
+  name: string;
+  status: string;
+  paired_at: string | null;
+  last_seen_at: string | null;
+  revoked_at: string | null;
 }
 
 export interface AuditLogItem {
