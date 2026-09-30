@@ -122,6 +122,7 @@ export const jobsApi = {
   createJob: (data: { kind: 'sync' | 'parse'; target_id: string; since_days?: number; allow_external?: boolean; force?: boolean }) =>
     apiClient.post('/admin/jobs', data),
   cancelJob: (id: string) => apiClient.post(`/admin/jobs/${id}/cancel`),
+  clearJobs: () => apiClient.post<{ deleted_count: number }>('/admin/jobs/clear'),
 };
 
 // 10. Devices, Audit & Status API

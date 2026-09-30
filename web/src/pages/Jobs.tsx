@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Table,
   Button,
@@ -19,6 +19,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   ClockCircleOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons';
 import { jobsApi } from '../api';
 import { AdminJobItem } from '../types';
@@ -27,6 +28,8 @@ const { Text, Paragraph } = Typography;
 
 export const Jobs: React.FC = () => {
   const [loading, setLoading] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const fetchSequence = useRef(0);
   const [jobs, setJobs] = useState<AdminJobItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -37,14 +40,17 @@ export const Jobs: React.FC = () => {
   const [selectedJob, setSelectedJob] = useState<AdminJobItem | null>(null);
 
   const fetchJobs = async () => {
+    const sequence = ++fetchSequence.current;
     setLoading(true);
     try {
       const res = await jobsApi.listJobs({ page, size: pageSize });
-      setJobs(res.data?.items || []);
-      setTotal(res.data?.total || 0);
+      if (sequence === fetchSequence.current) {
+        setJobs(res.data?.items || []);
+        setTotal(res.data?.total || 0);
+      }
     } catch (_) {
     } finally {
-      setLoading(false);
+      if (sequence === fetchSequence.current) setLoading(false);
     }
   };
 
@@ -58,6 +64,29 @@ export const Jobs: React.FC = () => {
       message.success('已请求取消该任务');
       fetchJobs();
     } catch (_) {}
+  };
+
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      const res = await jobsApi.clearJobs();
+      // Ignore older list responses so deleted tasks cannot reappear locally.
+      ++fetchSequence.current;
+      setJobs([]);
+      setTotal(0);
+      setDetailModalVisible(false);
+      setSelectedJob(null);
+      message.success(`已清除 ${res.data.deleted_count} 个任务`);
+      if (page !== 1) {
+        setPage(1);
+      } else {
+        await fetchJobs();
+      }
+    } catch (_) {
+      // The shared API client displays the server or network error.
+    } finally {
+      setClearing(false);
+    }
   };
 
   const getStatusBadge = (status: string) => {
@@ -133,6 +162,7 @@ export const Jobs: React.FC = () => {
           <Button
             size="small"
             type="link"
+            disabled={clearing}
             onClick={() => {
               setSelectedJob(record);
               setDetailModalVisible(true);
@@ -145,7 +175,7 @@ export const Jobs: React.FC = () => {
               title="确定取消该任务吗？"
               onConfirm={() => handleCancel(record.id)}
             >
-              <Button size="small" type="text" danger icon={<StopOutlined />}>
+              <Button size="small" type="text" danger disabled={clearing} icon={<StopOutlined />}>
                 取消
               </Button>
             </Popconfirm>
@@ -165,9 +195,35 @@ export const Jobs: React.FC = () => {
           </Space>
         }
         extra={
-          <Button icon={<SyncOutlined />} onClick={fetchJobs}>
-            刷新队列
-          </Button>
+          <Space>
+            <Popconfirm
+              title="确定清除所有任务队列吗？"
+              description={
+                <div>
+                  将删除所有分页中的排队任务和历史任务记录，此操作不可撤销。<br />
+                  不会删除邮件、草稿、账单或还款记录。<br />
+                  执行中的任务需先取消并等待结束；定时调度仍可能产生新任务。
+                </div>
+              }
+              onConfirm={handleClear}
+              okText="清除所有任务"
+              cancelText="取消"
+              okButtonProps={{ danger: true, loading: clearing }}
+              disabled={loading || clearing || total === 0}
+            >
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                loading={clearing}
+                disabled={loading || total === 0}
+              >
+                清除所有任务
+              </Button>
+            </Popconfirm>
+            <Button icon={<SyncOutlined />} onClick={fetchJobs} disabled={clearing}>
+              刷新队列
+            </Button>
+          </Space>
         }
       >
         <Table
@@ -180,6 +236,7 @@ export const Jobs: React.FC = () => {
             pageSize,
             total,
             showSizeChanger: true,
+            disabled: clearing,
             onChange: (p, ps) => {
               setPage(p);
               setPageSize(ps);

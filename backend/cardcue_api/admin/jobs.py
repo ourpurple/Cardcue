@@ -1,7 +1,7 @@
 """Durable queue shared by manual requests and scheduler."""
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from cardcue_api.admin.models import AdminJob, RuntimeSettings
 from cardcue_api.admin.schemas import JobCreate
 from cardcue_api.admin.security import require_admin, audit, now
@@ -54,6 +54,24 @@ async def jobs(page: int = Query(1, ge=1), size: int = Query(30, ge=1, le=100), 
     total = (await session.execute(select(func.count()).select_from(AdminJob))).scalar_one()
     rows = (await session.execute(select(AdminJob).order_by(AdminJob.created_at.desc()).offset((page-1)*size).limit(size))).scalars()
     return {"items": [public_job(r) for r in rows], "total": total}
+
+@router.post("/clear")
+async def clear_jobs(actor=Depends(require_admin), session=Depends(get_session)):
+    # Lock the snapshot so the worker cannot claim a queued task while it is
+    # being removed. Never delete a task still referenced by an active worker.
+    rows = (await session.execute(
+        select(AdminJob.id, AdminJob.status).order_by(AdminJob.id).with_for_update()
+    )).all()
+    if any(row.status == "running" for row in rows):
+        raise HTTPException(409, "存在执行中的任务，请先取消并等待执行结束后再清除")
+
+    identifiers = [row.id for row in rows]
+    # Bound the parameter count even when the queue contains many pages.
+    for start in range(0, len(identifiers), 1000):
+        await session.execute(delete(AdminJob).where(AdminJob.id.in_(identifiers[start:start + 1000])))
+    await audit(session, actor, "jobs_cleared", detail={"deleted_count": len(identifiers)})
+    # get_session commits the deletion and audit together, or rolls both back.
+    return {"deleted_count": len(identifiers)}
 
 @router.post("/{identifier}/cancel")
 async def cancel(identifier: uuid.UUID, actor=Depends(require_admin), session=Depends(get_session)):
