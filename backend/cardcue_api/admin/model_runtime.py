@@ -14,9 +14,8 @@ from cardcue_api.persistence.database import async_session_factory
 PROMPT_VERSION = "v2-direct-transactions-2"
 
 class ManagedExtractor:
-    def __init__(self, revision: ModelRevision | None, force=False):
+    def __init__(self, revision: ModelRevision | None):
         self.revision = revision
-        self.force = force
         self.usage = None
         self.fingerprint = None
 
@@ -53,16 +52,6 @@ class ManagedExtractor:
             str(email_date), source_manifest.model_dump() if source_manifest else None],
             ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         self.fingerprint = fingerprint
-        cache_key = "cache:" + fingerprint[:40]
-        async with async_session_factory() as session:
-            cached = await session.get(RuntimeSettings, cache_key)
-            if cached and not self.force:
-                cached_value = cached.value
-                # Support both single-draft and multi-draft cache formats
-                if isinstance(cached_value, list):
-                    return [StatementDraft.model_validate_json(json.dumps(item)) for item in cached_value], "model:cached"
-                else:
-                    return [StatementDraft.model_validate_json(json.dumps(cached_value))], "model:cached"
         url = params["base_url"].rstrip("/")
         if not url.endswith("/chat/completions"):
             url += "/chat/completions"
@@ -113,12 +102,6 @@ class ManagedExtractor:
                 async with async_session_factory() as session:
                     call = await session.get(ModelCall, call_id)
                     call.status, call.usage = "succeeded", self.usage
-                    cache_value = [r.model_dump(mode="json") for r in results]
-                    cached = await session.get(RuntimeSettings, cache_key)
-                    if cached:
-                        cached.value = cache_value
-                    else:
-                        session.add(RuntimeSettings(key=cache_key, value=cache_value))
                     await session.commit()
                 return results, "model"
             except Exception as exc:

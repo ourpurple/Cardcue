@@ -64,7 +64,7 @@ async def run_job(identifier):
                         except Exception:
                             revision = None
                 service = DraftService()
-                service.model_extractor = ManagedExtractor(revision, force=payload.get("force", False))
+                service.model_extractor = ManagedExtractor(revision)
                 drafts = await service.parse_email_source_multi(s, target_id)
                 status, result = "succeeded", {"draft_ids": [str(d.id) for d in drafts], "draft_id": str(drafts[0].id)}
             job = await s.get(AdminJob, identifier, populate_existing=True)

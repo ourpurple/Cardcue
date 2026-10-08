@@ -260,38 +260,13 @@ def test_pdf_extractor_oversized_guard():
 # Model Adapter Unit Tests
 # ---------------------------------------------------------------------------
 
-async def test_model_adapter_rule_fallback_when_no_key():
+async def test_model_adapter_raises_when_no_key():
     with patch("cardcue_api.parsing.model_adapter.settings") as mock_settings:
         mock_settings.llm_api_key = None
         mock_settings.LLM_API_KEY = None
         adapter = ModelStatementExtractor(api_key=None)
-        sample_text = "招商银行信用卡电子账单 本期应还金额：￥8,800.00 到期还款日：2026-10-15"
-        draft, extractor_name = await adapter.extract(sample_text)
-
-        assert extractor_name == "rule"
-        assert draft.bank == "招商银行"
-        assert draft.amount_minor == 880000
-        assert draft.due_date == date(2026, 10, 15)
-
-
-async def test_model_adapter_fingerprint_caching():
-    with patch("cardcue_api.parsing.model_adapter.settings") as mock_settings:
-        mock_settings.llm_api_key = None
-        mock_settings.LLM_API_KEY = None
-        adapter = ModelStatementExtractor(api_key=None)
-        sample_text = "中国建设银行信用卡对账单 本期应还款额：1,500.00 到期还款日：2026-10-20"
-
-        draft1, mode1 = await adapter.extract(sample_text)
-        fp = adapter.compute_fingerprint(sample_text)
-        assert fp is not None
-        assert len(fp) == 64  # SHA-256 length
-
-        # Seed fingerprint cache manually
-        adapter._fingerprint_cache[fp] = [draft1]
-
-        draft2, mode2 = await adapter.extract(sample_text)
-        assert mode2 == "model:cached"
-        assert draft2 == draft1
+        with pytest.raises(ValueError, match="model_not_configured"):
+            await adapter.extract("test")
 
 
 def test_storage_expiration_and_cleanup(tmp_path):

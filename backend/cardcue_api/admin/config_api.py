@@ -347,7 +347,7 @@ async def test_model(identifier: uuid.UUID, data: ModelTest, actor=Depends(recen
     if row.revoked:
         raise HTTPException(409, "配置已撤销")
     await session.commit()
-    extractor = ManagedExtractor(row, force=True)
+    extractor = ManagedExtractor(row)
     try:
         result, _ = await extractor.extract("测试银行信用卡账单：币种人民币 CNY，账单金额 100.00 元，最低还款 10.00 元，账单日 2026-01-01，到期日 2026-01-20。" if data.sample else "This is a connection test, not a bill. Return all financial fields as null.")
     except Exception:

@@ -476,10 +476,11 @@ def parse_model_response_multi(raw_json: str, email_date: date | None = None) ->
 # ---------------------------------------------------------------------------
 
 def sanitize_html_for_model(html: str) -> str:
-    """Remove dangerous elements from HTML while preserving structure for the model.
+    """Remove dangerous elements and non-structural attributes from HTML for the model.
 
     Unlike html_to_text() which flattens to plain text, this keeps the HTML
-    structure (tables, etc.) that helps the model understand the layout.
+    structure (tables, etc.) that helps the model understand the layout, but
+    strips styling/tracking bloat that inflates input size.
     """
     if not html or not html.strip():
         return ""
@@ -497,17 +498,21 @@ def sanitize_html_for_model(html: str) -> str:
                         "|//img[@width='1']|//img[@height='1']"):
         el.drop_tree()
 
-    # Remove event handlers and dangerous attributes
+    # Strip all attributes except structural ones needed for table layout
+    _KEEP_ATTRS = frozenset({"colspan", "rowspan"})
     for el in doc.iter():
         for attr in list(el.attrib):
-            lower = attr.lower()
-            if lower.startswith("on") or lower in ("srcdoc", "data", "src", "href", "action", "background"):
+            if attr.lower() not in _KEEP_ATTRS:
                 del el.attrib[attr]
 
     try:
         result = lxml.html.tostring(doc, encoding="unicode", method="html")
     except Exception:
         result = html
+
+    # Collapse whitespace bloat without destroying meaningful line breaks
+    result = re.sub(r"[ \t]+", " ", result)
+    result = re.sub(r"\n{3,}", "\n\n", result)
 
     return result
 
@@ -539,10 +544,6 @@ class ModelStatementExtractor:
         self.timeout_seconds = timeout_seconds
         self.use_v2_prompt = use_v2_prompt
         self.rule_extractor = HtmlStatementExtractor()
-        self._fingerprint_cache: dict[str, list[StatementDraft]] = {}
-
-    def compute_fingerprint(self, text: str) -> str:
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     async def extract(
         self,
@@ -563,10 +564,6 @@ class ModelStatementExtractor:
         email_date: date | None = None,
     ) -> tuple[list[StatementDraft], str]:
         """Extract one or more drafts using LLM if available, caching by fingerprint, or fallback to rules."""
-        fingerprint = self.compute_fingerprint(text)
-        if fingerprint in self._fingerprint_cache:
-            return self._fingerprint_cache[fingerprint], "model:cached"
-
         if not self.active_api_key:
             raise ValueError("model_not_configured")
         if len(text) > 100000:
@@ -619,7 +616,6 @@ class ModelStatementExtractor:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
                     drafts = parse_model_response_multi(content, email_date=email_date)
-                    self._fingerprint_cache[fingerprint] = drafts
                     return drafts, "model"
             except (ValidationError, json.JSONDecodeError, KeyError, ValueError) as e:
                 last_error = f"schema_validation_failed: {type(e).__name__}"
