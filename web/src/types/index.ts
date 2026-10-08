@@ -241,6 +241,9 @@ export interface StatementDraftDetail extends StatementDraftItem {
     alias: string | null;
     holder?: string | null;
     reference: string | null;
+    billing_mode: BillingMode | null;
+    billing_mode_source: BillingModeSource | null;
+    revision: number;
     cards?: Array<{
       id: string;
       tail: string;

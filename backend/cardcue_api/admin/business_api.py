@@ -1786,6 +1786,9 @@ async def get_draft_detail(
             "alias": a.alias,
             "holder": a.holder,
             "reference": a.reference,
+            "billing_mode": a.billing_mode,
+            "billing_mode_source": a.billing_mode_source,
+            "revision": a.revision,
             "cards": [{
                 "id": str(c.id),
                 "tail": c.tail,
@@ -1866,6 +1869,9 @@ async def confirm_draft(
         raise HTTPException(422, str(e))
 
     await audit(session, actor, "draft_confirmed", str(draft_id), {
+        "account_id": str(req.account_id),
+        "confirmed_billing_mode": req.confirmed_billing_mode,
+        "expected_account_revision": req.expected_account_revision,
         "statement_id": str(stmt.id),
         "version_id": str(ver.id),
         "amount_minor": ver.amount_minor,

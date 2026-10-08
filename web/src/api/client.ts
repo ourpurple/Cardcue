@@ -1,6 +1,13 @@
 import axios, { AxiosError, AxiosRequestConfig } from 'axios';
 import { message } from 'antd';
 
+// Opt in only when the caller renders its own operation-specific error.
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    suppressErrorToast?: boolean;
+  }
+}
+
 export const apiClient = axios.create({
   baseURL: '/v1',
   withCredentials: true,
@@ -55,10 +62,10 @@ apiClient.interceptors.response.use(
         message.error(typeof errorMsg === 'string' ? errorMsg : '权限受限或安全校验失败');
       } else if (status === 429) {
         message.error(typeof errorMsg === 'string' ? errorMsg : '请求过于频繁，请稍后再试');
-      } else {
+      } else if (!error.config?.suppressErrorToast) {
         message.error(typeof errorMsg === 'string' ? errorMsg : '操作失败，请重试');
       }
-    } else {
+    } else if (!error.config?.suppressErrorToast) {
       message.error('网络通信异常，请检查网络或后端服务连接');
     }
     return Promise.reject(error);

@@ -306,6 +306,9 @@ class StatementDraftConfirmRequest(BaseModel):
     request_id: uuid.UUID | None = None
     expected_revision: int | None = Field(default=None, ge=1)
     expected_statement_version_id: uuid.UUID | None = None
+    # Explicit review of an unknown account mode; never inferred from bank or card tail.
+    confirmed_billing_mode: Literal["per_card", "consolidated"] | None = None
+    expected_account_revision: int | None = Field(default=None, ge=1, strict=True)
     confirm_transaction_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10000)
     details_complete: bool = False
     # Number transcribed from the full source by the reviewer; never inferred from model rows.

@@ -106,7 +106,7 @@ export const draftsApi = {
   updateDraft: (id: string, data: any) =>
     apiClient.put(`/admin/drafts/${id}`, data),
   confirmDraft: (id: string, data: any) =>
-    apiClient.post(`/admin/drafts/${id}/confirm`, data),
+    apiClient.post(`/admin/drafts/${id}/confirm`, data, { suppressErrorToast: true }),
   rejectDraft: (id: string, reason: string) =>
     apiClient.post(`/admin/drafts/${id}/reject`, { reason }),
   deleteDraft: (id: string) =>

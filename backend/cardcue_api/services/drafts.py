@@ -268,19 +268,33 @@ class DraftService:
         account = (await session.execute(select(Account).where(Account.id == account_id).with_for_update())).scalar_one_or_none()
         if not account or account.status != "active":
             raise ConflictError("Active repayment account required")
-        if account.billing_mode is None:
-            raise ConflictError("Repayment mode requires manual confirmation")
+        if req.expected_account_revision is not None and account.revision != req.expected_account_revision:
+            raise ConflictError("账户已被其他操作修改，请重新打开草稿核对还款模式")
+        billing_mode = account.billing_mode
+        confirm_account_mode = billing_mode is None
+        if confirm_account_mode:
+            if req.confirmed_billing_mode is None or req.expected_account_revision is None:
+                raise ConflictError("请先人工确认账户还款模式：独立还款或合并还款")
+            # Confirming an unknown mode must not reinterpret any existing debt.
+            history = (await session.execute(select(Statement.id).where(
+                Statement.account_id == account_id
+            ).limit(1))).first()
+            if history:
+                raise ConflictError("账户已有正式账单，请先预览并人工核对历史归属，不能在入账时确认还款模式")
+            billing_mode = req.confirmed_billing_mode
+        elif req.confirmed_billing_mode is not None and req.confirmed_billing_mode != billing_mode:
+            raise ConflictError("账户还款模式与本次选择不一致，请重新打开草稿核对；不能在入账时更改已确认模式")
         from cardcue_api.domain.bank_rules import normalise_bank_name
         if draft.bank and normalise_bank_name(draft.bank) != normalise_bank_name(account.bank):
             raise ConflictError("Draft bank conflicts with repayment account")
         active_cards = list((await session.execute(select(Card).where(
             Card.account_id == account_id, Card.status == "active"
         ))).scalars().all())
-        if account.billing_mode == "per_card" and len(active_cards) != 1:
+        if billing_mode == "per_card" and len(active_cards) != 1:
             raise ConflictError("Per-card account must have exactly one active card")
         if card_id is not None and card_id not in {card.id for card in active_cards}:
             raise ConflictError("Selected card does not belong to active account")
-        if account.billing_mode == "per_card":
+        if billing_mode == "per_card":
             if len(set(draft.card_tails or [])) > 1:
                 raise ConflictError("Multi-card draft has no separate per-card total; review manually")
             if card_id is not None and card_id != active_cards[0].id:
@@ -433,6 +447,19 @@ class DraftService:
                 transaction_type=tx.transaction_type, source_draft_tx_id=tx.id,
                 confirmed_at=datetime.now(timezone.utc), confirmed_by=confirmed_by,
             ))
+
+        if confirm_account_mode:
+            account.billing_mode = billing_mode
+            account.billing_mode_source = "manual_override"
+            account.revision += 1
+            account.updated_at = datetime.now(timezone.utc)
+            await self._log_change(session, "account", account.id, "update", {
+                "id": str(account.id), "bank": account.bank, "alias": account.alias,
+                "holder": account.holder, "reference": account.reference,
+                "status": account.status, "billing_mode": account.billing_mode,
+                "billing_mode_source": account.billing_mode_source,
+                "revision": account.revision,
+            })
 
         # Update draft
         draft.detail_status = detail_status

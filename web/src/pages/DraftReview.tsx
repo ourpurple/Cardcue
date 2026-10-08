@@ -71,6 +71,11 @@ export const DraftReview: React.FC = () => {
   const [accountCardOptions, setAccountCardOptions] = useState<AccountCardOption[]>([]);
   const [selectedOption, setSelectedOption] = useState<AccountCardOption | null>(null);
 
+  const selectedAccount = currentDraft?.candidate_accounts.find(
+    (account) => account.id === selectedOption?.accountId
+  );
+  const needsBillingModeConfirmation = !!selectedAccount && !selectedAccount.billing_mode;
+
   const [form] = Form.useForm();
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -216,7 +221,9 @@ export const DraftReview: React.FC = () => {
 
       setSelectedOption(matchedOpt);
 
+      form.resetFields();
       form.setFieldsValue({
+        confirmed_billing_mode: undefined,
         account_card_key: initialKey,
         account_id: matchedOpt?.accountId || detail.matched_account_id || undefined,
         card_id: matchedOpt?.cardId || detail.matched_card_id || undefined,
@@ -235,6 +242,8 @@ export const DraftReview: React.FC = () => {
   };
 
   const handleAccountCardChange = (val: string | undefined) => {
+    // The choice belongs to one account only; never carry it to another selection.
+    form.setFieldsValue({ confirmed_billing_mode: undefined });
     if (!val) {
       setSelectedOption(null);
       form.setFieldsValue({
@@ -362,6 +371,10 @@ export const DraftReview: React.FC = () => {
         message.error('账单日与到期还款日不能为空');
         return;
       }
+      if (!selectedAccount || !Number.isInteger(selectedAccount.revision) || selectedAccount.revision < 1) {
+        message.error('账户信息缺失，请刷新并重新打开草稿；请确认后台已更新');
+        return;
+      }
       const amountMinor = yuanStringToCents(values.amount_yuan);
       if (amountMinor < 0) {
         message.error('账单金额不能为负数');
@@ -384,6 +397,8 @@ export const DraftReview: React.FC = () => {
         request_id: generateUUID(),
         expected_revision: currentDraft.revision,
         account_id: values.account_id,
+        expected_account_revision: selectedAccount.revision,
+        confirmed_billing_mode: needsBillingModeConfirmation ? values.confirmed_billing_mode : null,
         card_id: values.card_id || null,
         currency: values.currency || 'CNY',
         amount_minor: amountMinor,
@@ -399,8 +414,15 @@ export const DraftReview: React.FC = () => {
       setDrawerVisible(false);
       fetchDrafts();
     } catch (err: any) {
+      // Field validation already shows actionable inline errors. Session/security
+      // errors remain owned by the global interceptor and must not be duplicated.
+      if (err?.errorFields || [401, 403, 429].includes(err?.response?.status)) return;
       const detail = err?.response?.data?.detail;
-      message.error(typeof detail === 'string' ? detail : '确认失败，请核对归属、来源与交易笔数后重试');
+      const legacyModeError = detail === 'Repayment mode requires manual confirmation';
+      message.error(legacyModeError ? '请先人工确认账户还款模式；若页面没有选项，请更新后台并刷新页面'
+        : typeof detail === 'string' ? detail
+        : err?.isAxiosError && !err?.response ? '网络通信异常，请检查网络或后端服务连接'
+        : '确认失败，请核对归属、来源与交易笔数后重试');
     } finally {
       setActionLoading(false);
     }
@@ -999,6 +1021,40 @@ export const DraftReview: React.FC = () => {
                         </Button>
                       )}
                     </div>
+                  )}
+
+                  {selectedAccount && (
+                    needsBillingModeConfirmation ? (
+                      <>
+                        <Alert
+                          type="warning"
+                          showIcon
+                          message="账户还款模式待人工确认"
+                          description="请依据银行账单选择。独立还款：此账户仅对应一张有效卡片；合并还款：同一账户多卡共享一份账单，金额只统计一次。模式将在确认入账成功时保存；已有正式账单的账户需先核对历史归属。"
+                          style={{ marginBottom: 12 }}
+                        />
+                        <Form.Item
+                          name="confirmed_billing_mode"
+                          label="账户还款模式"
+                          rules={[{ required: true, message: '请选择独立还款或合并还款，不会自动推断' }]}
+                        >
+                          <Select
+                            placeholder="请依据银行账单人工选择"
+                            options={[
+                              { label: '独立还款（此账户仅对应一张有效卡片）', value: 'per_card' },
+                              { label: '合并还款（同一账户多卡共用账单）', value: 'consolidated' },
+                            ]}
+                          />
+                        </Form.Item>
+                      </>
+                    ) : (
+                      <Alert
+                        type="info"
+                        showIcon
+                        message={`账户还款模式：${selectedAccount.billing_mode === 'per_card' ? '独立还款' : '合并还款'}`}
+                        style={{ marginBottom: 16 }}
+                      />
+                    )
                   )}
 
                   <Row gutter={12}>
